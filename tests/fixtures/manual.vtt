@@ -1,0 +1,13 @@
+WEBVTT
+Kind: captions
+Language: en
+
+NOTE Synthetic test fixture; never captured from the user's phone.
+
+1
+00:00:01.000 --> 00:00:03.500 align:start position:10%
+<c.yellow>Hello world &amp; friends.</c>
+
+2
+00:00:04.000 --> 00:00:05.500
+Welcome!

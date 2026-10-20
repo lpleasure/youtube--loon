@@ -1,0 +1,10 @@
+#!name = YouTube 字幕注入验证（无 API）
+#!desc = 0.1.1；中文在上与居中待真机确认；与其他字幕重写插件互斥；密钥只存本地
+#!system = iOS,iPadOS
+#!date = 2026-10-20
+# 旧版 Script 语法；翻译设置由手机本地 setup 脚本写入。
+[Script]
+http-response ^https:\/\/(?:www\.youtube\.com|m\.youtube\.com|youtube\.com|video\.google\.com)\/api\/timedtext(?:\?|$) script-path=yt-probe.js,requires-body=true,binary-body-mode=false,timeout=5,tag=YTSubs probe
+
+[Mitm]
+hostname = www.youtube.com, m.youtube.com, youtube.com, video.google.com

@@ -1,0 +1,1 @@
+{"wireMagic":"pb3","pens":[{}],"wsWinStyles":[{}],"wpWinPositions":[{}],"events":[{"tStartMs":0,"id":1,"wpWinPosId":0,"wsWinStyleId":0},{"tStartMs":1000,"dDurationMs":2500,"wWinId":1,"segs":[{"utf8":"Hello ","tOffsetMs":0},{"utf8":"world & friends.","tOffsetMs":200}]},{"tStartMs":4000,"dDurationMs":1500,"wWinId":1,"segs":[{"utf8":"Welcome!"}]}]}
