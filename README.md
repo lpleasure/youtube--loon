@@ -42,9 +42,9 @@ node --test tests/*.test.cjs
 
 新版配置适用 Loon 3.5.1 (983)+；`.legacy.plugin` 使用旧语法。远程链接下载失败与字幕改写失败是不同问题，应分别检查 Loon 下载错误与 `[YTSubs]` 日志。
 
-## API Key 只保存在手机本地
+## API Key 只保存在设备本地
 
-在 Loon 新建临时本地脚本，复制 `local-setup.example.js`，仅在手机上替换 `LOCAL_KEY` 占位符并手动运行一次。保存成功后清掉编辑器里的 Key 并删除临时脚本。
+在 Loon 新建临时本地脚本，复制 `local-setup.example.js`，仅在设备上替换 `LOCAL_KEY` 占位符并手动运行一次。保存成功后清掉编辑器里的 Key 并删除临时脚本。
 
 - 不要将填写过 Key 的副本提交到仓库，无论仓库公开还是私有。
 - 仓库中的设置模板只能保留 `PASTE_KEY_ON_IPHONE_ONLY` 占位符。
