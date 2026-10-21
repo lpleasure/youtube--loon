@@ -3,6 +3,28 @@
   var CACHE = "ytloon.cache.v1", SETTINGS = "ytloon.settings.v1", KEY = "ytloon.deepseek.key", COOLDOWN = "ytloon.cooldown.v1";
   var done = false, timer, doc, translations = {}, additions = [], started = Date.now();
   var counts = {cached: 0, sent: 0, translated: 0, failed: 0};
+  var DEADLINE_MS = 22000, REQUEST_MS = 12000, MIN_REQUEST_MS = 4000, RETRY_MS = 750, MAX_CALLS = 4;
+  function remaining() { return DEADLINE_MS - 500 - (Date.now() - started); }
+  function cooldown(ms) {
+    // A parallel failure must never shorten a longer authentication/rate-limit cooldown.
+    if (!write(COOLDOWN, String(Math.max(Number(read(COOLDOWN)) || 0, Date.now() + ms)))) log("cooldown_write_failed");
+  }
+  function retryAfter(response) {
+    var headers = response && response.headers || {}, value;
+    Object.keys(headers).some(function (key) {
+      if (key.toLowerCase() !== "retry-after") return false;
+      value = headers[key]; return true;
+    });
+    var ms = /^\d+(?:\.\d+)?$/.test(String(value)) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+    return Number.isFinite(ms) ? Math.max(60000, Math.min(300000, ms)) : 60000;
+  }
+  function networkCode(error) {
+    // Inspect locally, emit only a fixed category (never error.message or error.code).
+    var value = typeof error === "string" ? error : String(error && error.code || "") + " " + String(error && error.message || "");
+    if (/timeout|timed?\s*out|ETIMEDOUT|-1001\b/i.test(value)) return "TIMEOUT";
+    if (/ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|network.*lost|connection.*lost|-100[359]\b/i.test(value)) return "NETWORK_TEMPORARY";
+    return "NETWORK";
+  }
   function read(key) { try { return $persistentStore.read(key); } catch (_) { return null; } }
   function write(key, value) { try { return $persistentStore.write(value, key); } catch (_) { return false; } }
   function readJSON(key, fallback) { try { return JSON.parse(read(key)) || fallback; } catch (_) { return fallback; } }
@@ -32,7 +54,7 @@
       saveCache();
       if (doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers($response.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed);
+    log("result=" + reason + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " version=0.1.2 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
@@ -68,18 +90,22 @@
     });
     if (current.length) batches.push(current);
     batches = batches.slice(0, 4);
-    var next = 0, active = 0, stopped = false;
-    timer = setTimeout(function () { finish("DEADLINE"); }, 18000);
+    var next = 0, active = 0, pending = 0, stopped = false, batchFailed = false;
+    timer = setTimeout(function () { finish("DEADLINE"); }, Math.max(1, DEADLINE_MS - (Date.now() - started)));
     function pump() {
       if (done) return;
-      if ((!stopped && next >= batches.length || stopped) && active === 0) return finish(stopped ? "API_FALLBACK" : "COMPLETE_BOUNDED");
-      while (!done && !stopped && active < 2 && next < batches.length) {
-        if (Date.now() - started >= 17000) return finish("DEADLINE");
-        send(batches[next++]);
+      if (Number(read(COOLDOWN)) > Date.now()) stopped = true;
+      if ((stopped || next >= batches.length || counts.sent >= MAX_CALLS) && active === 0) return finish(stopped || batchFailed ? "API_FALLBACK" : "COMPLETE_BOUNDED");
+      // Reserve retry slots and pause new batches during backoff.
+      while (!done && !stopped && !pending && active < 2 && next < batches.length && counts.sent < MAX_CALLS) {
+        if (remaining() < MIN_REQUEST_MS) { if (!active) finish("DEADLINE"); return; }
+        var index = next++;
+        send(batches[index], index + 1, 1);
       }
     }
-    function send(batch) {
+    function send(batch, batchID, attempt) {
       active++; counts.sent++;
+      var sentAt = Date.now(), timeout = Math.min(REQUEST_MS, remaining());
       var payload = {
         model: cfg.model, stream: false, thinking: {type: "disabled"}, max_tokens: 4096,
         response_format: {type: "json_object"},
@@ -92,32 +118,60 @@
       function callback(error, response, data) {
         if (done || settled) return;
         settled = true; active--;
+        // Enforce the deadline even when the runtime delays the timer callback.
+        if (Date.now() - started >= DEADLINE_MS) return finish("DEADLINE");
+        var status = Number(response && response.status);
+        status = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+        var code = "", retryable = false, cooldownMS = 0;
+        if (status && status !== 200) {
+          if (status === 401 || status === 403) { code = "HTTP_AUTH"; cooldownMS = 300000; }
+          else if (status === 429) { code = "HTTP_RATE_LIMIT"; cooldownMS = retryAfter(response); }
+          else if (status >= 500) { code = "HTTP_SERVER"; retryable = true; cooldownMS = 10000; }
+          else { code = "HTTP_OTHER"; cooldownMS = 60000; }
+        } else if (error || !status) {
+          code = networkCode(error); retryable = code === "TIMEOUT" || code === "NETWORK_TEMPORARY"; cooldownMS = 10000;
+        }
         try {
-          var status = Number(response && response.status);
-          if (error || status !== 200) {
-            stopped = true;
-            write(COOLDOWN, String(Date.now() + (status === 401 || status === 403 ? 300000 : 60000)));
-            log("api_status=" + (status || "NETWORK_ERROR"));
-            throw new Error("API_HTTP");
+          if (!code) {
+            var result = YTSubs.validateReply(data, batch);
+            batch.forEach(function (c) {
+              aliases[c.id].forEach(function (id) { translations[id] = result[c.id]; counts.translated++; });
+              additions.push({k: c.key, v: result[c.id], expires: Date.now() + 7 * 86400000});
+            });
           }
-          var result = YTSubs.validateReply(data, batch);
-          batch.forEach(function (c) {
-            aliases[c.id].forEach(function (id) { translations[id] = result[c.id]; counts.translated++; });
-            additions.push({k: c.key, v: result[c.id], expires: Date.now() + 7 * 86400000});
-          });
-        } catch (_) {
-          counts.failed++; stopped = true;
-          write(COOLDOWN, String(Math.max(Number(read(COOLDOWN)) || 0, Date.now() + 60000)));
+        } catch (e) {
+          code = /^(API_BODY_LIMIT|API_JSON_OUTER|API_JSON_INNER|API_SCHEMA|API_FINISH_LENGTH|API_FINISH_FILTER|API_FINISH_OTHER)$/.test(e && e.code) ? e.code : "API_VALIDATION";
+        }
+        if (code) {
+          counts.failed++;
+          var retry = retryable && attempt === 1 && !stopped && counts.sent + pending < MAX_CALLS && remaining() >= RETRY_MS + MIN_REQUEST_MS && !(Number(read(COOLDOWN)) > Date.now());
+          log("api_error=" + code + " status=" + status + " batch=" + batchID + " attempt=" + attempt + " elapsed_ms=" + (Date.now() - sentAt) + " timeout_ms=" + timeout + " retry_in_ms=" + (retry ? RETRY_MS : 0) + " cooldown_ms=" + (retry ? 0 : cooldownMS));
+          if (retry) {
+            active++; pending++;
+            setTimeout(function () {
+              active--; pending--;
+              if (done) return;
+              if (stopped || Number(read(COOLDOWN)) > Date.now() || remaining() < MIN_REQUEST_MS || counts.sent >= MAX_CALLS) {
+                batchFailed = true; stopped = true; cooldown(cooldownMS);
+                log("retry_skipped batch=" + batchID + " cooldown_ms=" + cooldownMS);
+                pump(); return;
+              }
+              send(batch, batchID, attempt + 1);
+            }, RETRY_MS);
+          } else {
+            batchFailed = true;
+            if (cooldownMS) { stopped = true; cooldown(cooldownMS); }
+          }
         }
         pump();
       }
       try {
         $httpClient.post({
-          url: "https://api.deepseek.com/chat/completions", timeout: Math.min(8000, Math.max(1, 17500 - (Date.now() - started))),
+          url: "https://api.deepseek.com/chat/completions", timeout: timeout,
           headers: {"Content-Type": "application/json", Authorization: "Bearer " + apiKey},
           body: JSON.stringify(payload), "auto-redirect": false, "auto-cookie": false, insecure: false
         }, callback);
-      } catch (_) { callback(true, null, null); }
+      } catch (e) { callback(e, null, null); }
     }
     pump();
   } catch (e) { finish(e.code || "SCRIPT_ERROR"); }
