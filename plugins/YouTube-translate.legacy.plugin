@@ -1,7 +1,7 @@
 #!name = YouTube DeepSeek 双语字幕（实验版）
-#!desc = 0.1.1；中文在上与居中待真机确认；与其他字幕重写插件互斥；密钥只存本地
+#!desc = 0.1.2；中文在上与居中待真机确认；与其他字幕重写插件互斥；密钥只存本地
 #!system = iOS,iPadOS
-#!date = 2026-10-20
+#!date = 2026-10-21
 # 旧版 Script 语法；翻译设置由手机本地 setup 脚本写入。
 [Script]
 http-response ^https:\/\/(?:www\.youtube\.com|m\.youtube\.com|youtube\.com|video\.google\.com)\/api\/timedtext(?:\?|$) script-path=https://raw.githubusercontent.com/lpleasure/youtube-loon-deepseek/main/dist/yt-translate.js,requires-body=true,binary-body-mode=false,timeout=25,tag=YTSubs translate

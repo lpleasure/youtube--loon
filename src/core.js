@@ -215,11 +215,20 @@ var YTSubs = (function () {
   }
   function validateReply(data, batch) {
     if (typeof data !== "string" || data.length > 100000) fail("API_BODY_LIMIT");
-    var outer = JSON.parse(data), choice = outer.choices && outer.choices[0];
-    if (!choice || choice.finish_reason !== "stop" || !choice.message || typeof choice.message.content !== "string") fail("API_INCOMPLETE");
-    var result = JSON.parse(choice.message.content), expected = Object.create(null), found = Object.create(null);
+    var outer, result;
+    try { outer = JSON.parse(data); } catch (_) { fail("API_JSON_OUTER"); }
+    var choice = outer && Array.isArray(outer.choices) && outer.choices[0];
+    if (!choice || !choice.message || typeof choice.message.content !== "string") fail("API_SCHEMA");
+    if (choice.finish_reason !== "stop") {
+      // Only fixed codes leave the validator; never log provider-controlled values.
+      if (choice.finish_reason === "length") fail("API_FINISH_LENGTH");
+      if (choice.finish_reason === "content_filter") fail("API_FINISH_FILTER");
+      fail("API_FINISH_OTHER");
+    }
+    try { result = JSON.parse(choice.message.content); } catch (_) { fail("API_JSON_INNER"); }
+    var expected = Object.create(null), found = Object.create(null);
     batch.forEach(function (c) { expected[c.id] = true; });
-    if (!Array.isArray(result.translations) || result.translations.length !== batch.length) fail("API_SCHEMA");
+    if (!result || !Array.isArray(result.translations) || result.translations.length !== batch.length) fail("API_SCHEMA");
     result.translations.forEach(function (item) {
       if (!item || !Number.isInteger(item.id) || !expected[item.id] || found[item.id] || typeof item.text !== "string" || !clean(item.text) || item.text.length > 1600) fail("API_SCHEMA");
       found[item.id] = clean(item.text).replace(/\s+/g, " ");

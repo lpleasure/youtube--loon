@@ -12,7 +12,18 @@ const requestURL = 'https://www.youtube.com/api/timedtext?v=synthetic&lang=en&si
 function harness(mode = 'translate', options = {}) {
   const store = Object.assign({'ytloon.deepseek.key': 'TEST_ONLY_NOT_A_REAL_CREDENTIAL'}, options.store);
   const results = [], calls = [], logs = [], timers = new Map(); let serial = 0;
+  let now = Date.now(); const epoch = now;
+  function advance(ms) {
+    const target = now + ms;
+    for (;;) {
+      const due = [...timers].filter(([,t]) => t.at <= target).sort((a,b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      now = due[1].at; timers.delete(due[0]); due[1].fn();
+    }
+    now = target;
+  }
   const ctx = {
+    Date: class extends Date { static now() { return now; } },
     $request: {url: options.url || requestURL},
     $response: {status: options.status || 200, headers: {'Content-Type': 'application/json', 'Content-Length': '9', 'Content-Encoding': 'gzip', ETag: 'stale'}, body: options.body === undefined ? fixture('json3') : options.body},
     $argument: options.args === undefined ? {enabled: true} : options.args,
@@ -20,16 +31,16 @@ function harness(mode = 'translate', options = {}) {
     $persistentStore: {read: k => store[k], write: (v, k) => { if (options.storageFails) return false; if (v == null) delete store[k]; else store[k] = v; return true; }},
     $httpClient: {post: (opt, cb) => { calls.push({options: plain(opt), cb}); if (options.throwHTTP) throw new Error('network PRIVATE_SENTINEL'); }},
     console: {log: message => logs.push(message)},
-    setTimeout: fn => { timers.set(++serial, fn); return serial; }, clearTimeout: id => timers.delete(id)
+    setTimeout: (fn, delay) => { timers.set(++serial, {fn, at: now + delay}); return serial; }, clearTimeout: id => timers.delete(id)
   };
   if (options.noClearTimeout) delete ctx.clearTimeout;
   vm.runInNewContext(fs.readFileSync(path.join(root, 'dist', `yt-${mode}.js`), 'utf8'), ctx, {timeout: 1000});
-  return {store, results, calls, logs, timers, respond(index = 0, customize) {
+  return {store, results, calls, logs, timers, epoch, advance, elapse(ms) { now += ms; }, now: () => now, respond(index = 0, customize) {
     const call = calls[index], input = JSON.parse(JSON.parse(call.options.body).messages[1].content).subtitles;
     let outer = {choices: [{finish_reason: 'stop', message: {content: JSON.stringify({translations: input.map(c => ({id: c.id, text: '译文 ' + c.id}))})}}]};
     if (customize) outer = customize(outer, input);
     call.cb(null, {status: 200}, typeof outer === 'string' ? outer : JSON.stringify(outer));
-  }, deadline() { Array.from(timers.values()).forEach(fn => fn()); }};
+  }, deadline() { advance(22000); }};
 }
 
 for (const format of ['json3', 'srv3', 'srv1', 'vtt']) {
@@ -109,7 +120,7 @@ test('valid API result is merged; key and signed URL never appear in logs/cache/
   assert.equal(opt.url, 'https://api.deepseek.com/chat/completions');
   assert.equal(opt.insecure, false); assert.equal(opt['auto-redirect'], false); assert.equal(opt['auto-cookie'], false);
   assert.equal(payload.response_format.type, 'json_object'); assert.equal(payload.thinking.type, 'disabled');
-  assert.equal(payload.stream, false); assert.ok(opt.timeout <= 8000);
+  assert.equal(payload.stream, false); assert.equal(opt.timeout, 12000);
   h.respond(); assert.equal(h.results.length, 1); assert.ok(h.results[0].body.includes('译文'));
   assert.ok(h.store['ytloon.cache.v1']);
   for (const text of [h.logs.join(' '), h.store['ytloon.cache.v1'], opt.body]) {
@@ -132,11 +143,13 @@ test('cache corruption recovers; storage failure still returns valid translated 
   const h = harness('translate', {store:{'ytloon.cache.v1':'broken'}, storageFails:true}); h.respond();
   assert.ok(h.results[0].body.includes('译文')); assert.ok(h.logs.some(x => x.includes('cache_write_failed')));
 });
-for (const status of [401,403,429,500,302]) test(`HTTP ${status} falls back and starts cooldown`, () => {
+for (const status of [401,403,429,400,402,422,302]) test(`HTTP ${status} falls back without retry and starts classified cooldown`, () => {
   const h = harness(); h.calls[0].cb(null, {status}, 'PRIVATE_SERVER_BODY');
   assert.deepEqual(h.results, [{}]); assert.ok(Number(h.store['ytloon.cooldown.v1']) > Date.now());
   assert.equal(harness('translate', {store:h.store}).calls.length, 0);
   assert.equal(h.logs.join(' ').includes('PRIVATE_SERVER_BODY'), false);
+  assert.equal(Number(h.store['ytloon.cooldown.v1']) - h.now(), [401,403].includes(status) ? 300000 : 60000);
+  h.advance(1000); assert.equal(h.calls.length, 1);
 });
 test('network error and synchronous HTTP throw each finish once', () => {
   const h = harness(); h.calls[0].cb('PRIVATE_SENTINEL', null, null); assert.deepEqual(h.results,[{}]);
@@ -152,6 +165,8 @@ for (const [name, transform] of [
   ['unknown id', x => { x.choices[0].message.content = '{"translations":[{"id":0,"text":"one"},{"id":9,"text":"two"}]}'; return x; }]
 ]) test(`${name}: rejects whole batch, no bad cache`, () => {
   const h = harness(); h.respond(0, transform); assert.deepEqual(h.results,[{}]); assert.equal(h.store['ytloon.cache.v1'],undefined);
+  assert.equal(h.store['ytloon.cooldown.v1'], undefined); assert.equal(h.calls.length, 1);
+  assert.equal(harness('translate', {store:h.store}).calls.length, 1);
 });
 test('global deadline ignores late and duplicate callbacks; done exactly once', () => {
   const h = harness(); h.deadline(); h.respond(); h.respond(); assert.deepEqual(h.results,[{}]); assert.equal(h.store['ytloon.cache.v1'],undefined);
@@ -277,4 +292,186 @@ test('empty translation map keeps every original format byte-for-byte', () => {
 test('Loon runtime without clearTimeout still returns once and ignores its late timer', () => {
   const h=harness('translate',{noClearTimeout:true}); h.respond(); h.deadline();
   assert.equal(h.results.length,1); assert.ok(h.results[0].body.includes('译文'));
+});
+
+const manyCues = (n = 100) => JSON.stringify({events:Array.from({length:n},(_,i)=>({
+  tStartMs:i*1000, dDurationMs:900, segs:[{utf8:'cue '+i}]
+}))});
+const httpFailure = (h, i, status = 503, headers = {}) => h.calls[i].cb(null, {status, headers}, 'PRIVATE_SERVER_BODY');
+
+for (const status of [500,502,503,504]) test('HTTP '+status+' retries once after backoff then caches success', () => {
+  const h = harness();
+  httpFailure(h,0,status); assert.equal(h.results.length,0); assert.equal(h.store['ytloon.cooldown.v1'],undefined);
+  h.advance(749); assert.equal(h.calls.length,1);
+  h.advance(1); assert.equal(h.calls.length,2); assert.equal(h.calls[0].options.body,h.calls[1].options.body);
+  h.respond(1); assert.ok(h.results[0].body.includes('译文')); assert.ok(h.store['ytloon.cache.v1']);
+  assert.ok(h.logs.some(x=>x.includes('api_error=HTTP_SERVER status='+status) && x.includes('retry_in_ms=750')));
+  assert.equal(h.store['ytloon.cooldown.v1'],undefined);
+});
+
+for (const error of ['ETIMEDOUT PRIVATE_SENTINEL', {code:-1001, message:'PRIVATE_SENTINEL'},
+  'The network connection was lost.', {code:'ECONNRESET',message:'PRIVATE_SENTINEL'}, 'EAI_AGAIN']) {
+  test('temporary network error gets bounded retry: '+(typeof error==='string'?error.split(' ')[0]:error.code), () => {
+    const h=harness(); h.calls[0].cb(error,null,null); h.advance(750);
+    assert.equal(h.calls.length,2); h.respond(1); assert.equal(h.results.length,1);
+    assert.equal(h.logs.join(' ').includes('PRIVATE_SENTINEL'),false);
+  });
+}
+
+test('exhausted transient retry writes only 10s cooldown and blocks subsequent responses', () => {
+  const h=harness(); httpFailure(h,0); h.advance(750); httpFailure(h,1);
+  assert.deepEqual(h.results,[{}]); assert.equal(Number(h.store['ytloon.cooldown.v1'])-h.now(),10000);
+  assert.equal(harness('translate',{store:h.store}).calls.length,0);
+  h.deadline(); h.respond(1); assert.equal(h.calls.length,2); assert.equal(h.results.length,1);
+});
+
+test('unknown network error and TLS errors do not blindly retry', () => {
+  for (const error of ['PRIVATE_SENTINEL', {code:'CERT_HAS_EXPIRED',message:'PRIVATE_SENTINEL'}]) {
+    const h=harness(); h.calls[0].cb(error,null,null); h.advance(750);
+    assert.deepEqual(h.results,[{}]); assert.equal(h.calls.length,1);
+    assert.ok(h.logs.some(x=>x.includes('api_error=NETWORK status=0')));
+    assert.equal(Number(h.store['ytloon.cooldown.v1'])-h.epoch,10000);
+  }
+});
+
+test('HTTP auth/rate-limit status wins over a simultaneous network error', () => {
+  for (const status of [401,403,429]) {
+    const h=harness(); h.calls[0].cb('ETIMEDOUT PRIVATE_SENTINEL',{status},'PRIVATE_SERVER_BODY');
+    assert.deepEqual(h.results,[{}]); assert.equal(h.calls.length,1);
+    assert.ok(h.logs[0].includes('status='+status));
+  }
+});
+
+test('Retry-After supports case-insensitive seconds/date, defaults and bounded cooldown', () => {
+  for (const [value,expected] of [['120',120000],['99999999',300000],['0',60000],['PRIVATE_SENTINEL',60000]]) {
+    const h=harness(); httpFailure(h,0,429,{'rEtRy-AfTeR':value});
+    assert.equal(Number(h.store['ytloon.cooldown.v1'])-h.now(),expected);
+    assert.equal(h.logs.join(' ').includes('PRIVATE_SENTINEL'),false);
+  }
+  const h=harness(), date=new Date(h.now()+180000).toUTCString();
+  httpFailure(h,0,429,{'Retry-After':date});
+  assert.equal(Number(h.store['ytloon.cooldown.v1']),Date.parse(date));
+});
+
+test('parallel transient failure and success cannot shorten or clear auth cooldown', () => {
+  const h=harness('translate',{body:manyCues()});
+  httpFailure(h,0,401); const until=h.store['ytloon.cooldown.v1'];
+  httpFailure(h,1,503); assert.equal(h.store['ytloon.cooldown.v1'],until);
+  assert.equal(h.calls.length,2); assert.deepEqual(h.results,[{}]);
+  const b=harness('translate',{body:manyCues(30)});
+  httpFailure(b,0,403); b.respond(1);
+  assert.ok(b.results[0].body.includes('译文')); assert.ok(b.store['ytloon.cooldown.v1']);
+});
+
+test('pending retry is suppressed by another batch auth failure, even without clearTimeout', () => {
+  const h=harness('translate',{body:manyCues(),noClearTimeout:true});
+  httpFailure(h,0); httpFailure(h,1,401); const until=h.store['ytloon.cooldown.v1'];
+  h.advance(750); assert.equal(h.calls.length,2); assert.deepEqual(h.results,[{}]);
+  assert.equal(h.store['ytloon.cooldown.v1'],until); h.deadline(); assert.equal(h.results.length,1);
+});
+
+test('retry rechecks cooldown written by another script execution', () => {
+  const h=harness(); httpFailure(h,0);
+  const until=String(h.now()+300000); h.store['ytloon.cooldown.v1']=until;
+  h.advance(750); assert.equal(h.calls.length,1); assert.deepEqual(h.results,[{}]);
+  assert.equal(h.store['ytloon.cooldown.v1'],until);
+});
+
+test('two simultaneous retries reserve slots: at most two active and four HTTP calls total', () => {
+  const h=harness('translate',{body:manyCues()});
+  httpFailure(h,0); httpFailure(h,1); h.advance(750);
+  assert.equal(h.calls.length,4); h.respond(2); h.respond(3);
+  assert.equal(h.calls.length,4); assert.equal(h.results.length,1);
+  assert.equal(JSON.parse(h.results[0].body).events.filter(e=>e.segs[0].utf8.includes('译文')).length,48);
+});
+
+test('request cap prevents retry after all four calls have been spent', () => {
+  const h=harness('translate',{body:manyCues()});
+  h.respond(0); h.respond(1); httpFailure(h,2); h.respond(3);
+  h.advance(750); assert.equal(h.calls.length,4); assert.equal(h.results.length,1);
+  assert.equal(Number(h.store['ytloon.cooldown.v1'])-h.epoch,10000);
+});
+
+test('JSON validation failure continues queued batches without global cooldown', () => {
+  const h=harness('translate',{body:manyCues()});
+  h.respond(0,()=>'{PRIVATE_SENTINEL'); assert.equal(h.calls.length,3);
+  h.respond(1); h.respond(2); h.respond(3);
+  assert.equal(h.calls.length,4); assert.equal(h.store['ytloon.cooldown.v1'],undefined);
+  const events=JSON.parse(h.results[0].body).events;
+  assert.equal(events[0].segs[0].utf8,'cue 0'); assert.ok(events[24].segs[0].utf8.includes('译文'));
+  assert.ok(h.logs.some(x=>x.includes('result=API_FALLBACK')));
+});
+
+for (const [code, transform] of [
+  ['API_JSON_OUTER',()=>'{PRIVATE_SENTINEL'],
+  ['API_SCHEMA',()=>null],
+  ['API_SCHEMA',()=>({choices:[]})],
+  ['API_SCHEMA',x=>{x.choices[0].message.content='null';return x;}],
+  ['API_JSON_INNER',x=>{x.choices[0].message.content='{PRIVATE_SENTINEL';return x;}],
+  ['API_FINISH_LENGTH',x=>{x.choices[0].finish_reason='length';return x;}],
+  ['API_FINISH_FILTER',x=>{x.choices[0].finish_reason='content_filter';return x;}],
+  ['API_FINISH_OTHER',x=>{x.choices[0].finish_reason='PRIVATE_SENTINEL';return x;}],
+  ['API_BODY_LIMIT',()=> 'x'.repeat(100001)]
+]) test('safe actionable validator classification: '+code, () => {
+  const h=harness(); h.respond(0,transform);
+  assert.ok(h.logs.some(x=>x.includes('api_error='+code+' status=200')));
+  assert.equal(h.logs.join(' ').includes('PRIVATE_SENTINEL'),false);
+  assert.equal(h.store['ytloon.cache.v1'],undefined); assert.equal(h.store['ytloon.cooldown.v1'],undefined);
+  assert.deepEqual(h.results,[{}]); assert.equal(h.calls.length,1);
+});
+
+test('timeout retry fits remaining time, with 500ms margin inside the 22s deadline', () => {
+  const h=harness(); h.advance(12000); h.calls[0].cb('timeout',null,null);
+  h.advance(750); assert.equal(h.calls.length,2); assert.equal(h.calls[1].options.timeout,8750);
+  h.advance(8000); h.respond(1); assert.ok(h.results[0].body.includes('译文'));
+  assert.ok(h.now()-h.epoch < 22000);
+});
+
+test('insufficient time skips retry and new batches without discarding active success', () => {
+  const h=harness(); h.advance(18000); httpFailure(h,0);
+  assert.equal(h.calls.length,1); assert.deepEqual(h.results,[{}]);
+  const b=harness('translate',{body:manyCues()});
+  b.advance(18000); b.respond(0); assert.equal(b.results.length,0); assert.equal(b.calls.length,2);
+  b.respond(1); assert.equal(b.results.length,1); assert.ok(b.results[0].body.includes('译文'));
+});
+
+test('late timer scheduling cannot start a retry with too little time', () => {
+  const h=harness(); httpFailure(h,0);
+  const retry=[...h.timers.values()].find(t=>t.at-h.epoch===750);
+  h.elapse(18000); retry.fn();
+  assert.equal(h.calls.length,1); assert.deepEqual(h.results,[{}]);
+});
+
+test('missing HTTP callback returns partial success at 22s, ignores late/duplicate callback', () => {
+  const h=harness('translate',{body:manyCues(30),noClearTimeout:true});
+  h.respond(0); h.advance(21999); assert.equal(h.results.length,0);
+  h.advance(1); assert.ok(h.results[0].body.includes('译文'));
+  const saved=h.store['ytloon.cache.v1']; h.respond(1); h.respond(0);
+  assert.equal(h.store['ytloon.cache.v1'],saved); assert.equal(h.results.length,1);
+  assert.ok(h.logs.some(x=>x.includes('result=DEADLINE')));
+});
+
+test('callback after absolute deadline is ignored even before timer has fired', () => {
+  const h=harness(); h.elapse(22000); h.respond();
+  assert.deepEqual(h.results,[{}]); assert.equal(h.store['ytloon.cache.v1'],undefined);
+});
+
+test('success in the final processing margin is preserved before the absolute deadline', () => {
+  const h=harness(); h.elapse(21600); h.respond();
+  assert.ok(h.results[0].body.includes('译文')); assert.equal(h.results.length,1);
+});
+
+test('duplicate callbacks during backoff cannot schedule another retry or mutate cache', () => {
+  const h=harness(); httpFailure(h,0); httpFailure(h,0); h.respond(0);
+  h.advance(750); assert.equal(h.calls.length,2); h.respond(1);
+  assert.equal(h.results.length,1); assert.ok(h.results[0].body.includes('译文'));
+});
+
+test('diagnostics never include key, Authorization, subtitle text, signed URL or response body', () => {
+  const body=JSON.stringify({events:[{tStartMs:0,dDurationMs:1000,segs:[{utf8:'PRIVATE_SUBTITLE'}]}]});
+  const h=harness('translate',{body});
+  h.calls[0].cb({code:'ETIMEDOUT',message:'Authorization Bearer TEST_ONLY_NOT_A_REAL_CREDENTIAL PRIVATE_SUBTITLE PRIVATE_SENTINEL'},null,null);
+  h.advance(750); httpFailure(h,1,503);
+  const logs=h.logs.join(' ');
+  for (const secret of ['Authorization','TEST_ONLY_NOT_A_REAL_CREDENTIAL','PRIVATE_SUBTITLE','PRIVATE_SENTINEL','PRIVATE_SERVER_BODY']) assert.equal(logs.includes(secret),false);
 });

@@ -1,7 +1,7 @@
 #!name = YouTube 字幕注入验证（无 API）
-#!desc = 0.1.1；中文在上与居中待真机确认；与其他字幕重写插件互斥；密钥只存本地
+#!desc = 0.1.2；中文在上与居中待真机确认；与其他字幕重写插件互斥；密钥只存本地
 #!system = iOS,iPadOS
-#!date = 2026-10-20
+#!date = 2026-10-21
 #!loon_version = 3.5.1(983)
 [Script]
 response if ${url} ~= /^https:\/\/(?:www\.youtube\.com|m\.youtube\.com|youtube\.com|video\.google\.com)\/api\/timedtext(?:\?|$)/ then script("yt-probe.js") with requires_body=true, binary_body_mode=false, timeout=5, tag="YTSubs probe"
