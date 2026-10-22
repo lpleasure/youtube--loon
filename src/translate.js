@@ -1,9 +1,12 @@
 (function () {
   "use strict";
+  var prewarm = typeof YTSubsPrewarm !== "undefined" && YTSubsPrewarm;
+  var requestContext = typeof $request !== "undefined" ? $request : {}, responseContext = typeof $response !== "undefined" ? $response : {};
+  var snapshot, SNAPSHOT = "ytloon.pending.v1";
   var CACHE = "ytloon.cache.v1", SETTINGS = "ytloon.settings.v1", KEY = "ytloon.deepseek.key", COOLDOWN = "ytloon.cooldown.v1";
   var done = false, timer, doc, translations = {}, additions = [], started = Date.now();
   var counts = {cached: 0, sent: 0, translated: 0, failed: 0};
-  var DEADLINE_MS = 22000, REQUEST_MS = 12000, MIN_REQUEST_MS = 4000, RETRY_MS = 750, MAX_CALLS = 4;
+  var DEADLINE_MS = prewarm ? 270000 : 22000, REQUEST_MS = prewarm ? 30000 : 12000, MIN_REQUEST_MS = 4000, RETRY_MS = 750, MAX_CALLS = 4, concurrency = 8;
   function remaining() { return DEADLINE_MS - 500 - (Date.now() - started); }
   function cooldown(ms) {
     // A parallel failure must never shorten a longer authentication/rate-limit cooldown.
@@ -39,11 +42,12 @@
     // Reload before merge to reduce lost updates; Loon storage has no transaction API.
     var entries = loadCache(), latest = Object.create(null);
     entries.concat(additions).forEach(function (r) { latest[r.k] = r; });
-    entries = Object.keys(latest).map(function (k) { return latest[k]; }).sort(function (a, b) { return a.expires - b.expires; }).slice(-400);
+    entries = Object.keys(latest).map(function (k) { return latest[k]; }).sort(function (a, b) { return a.expires - b.expires; }).slice(-6000);
     var sizes = entries.map(function (r) { return YTSubs.utf8size(JSON.stringify(r)); });
     var bytes = sizes.reduce(function (sum, n) { return sum + n; }, 2 + Math.max(0, entries.length - 1));
-    while (entries.length && bytes > 262144) { bytes -= sizes.shift() + (entries.length > 1 ? 1 : 0); entries.shift(); }
+    while (entries.length && bytes > 4194304) { bytes -= sizes.shift() + (entries.length > 1 ? 1 : 0); entries.shift(); }
     if (!write(CACHE, JSON.stringify(entries))) log("cache_write_failed");
+    else additions = [];
   }
   function finish(reason) {
     if (done) return;
@@ -52,22 +56,31 @@
     var response = {};
     try {
       saveCache();
-      if (doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers($response.headers)};
+      if (!prewarm && doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers(responseContext.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=0.1.3 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=0.1.4 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
-    if (!YTSubs.URL_RE.test($request.url) || !YTSubs.statusOK($response)) return finish("NOT_TARGET");
-    doc = YTSubs.parse($response.body);
+    if (prewarm) {
+      snapshot = readJSON(SNAPSHOT, null);
+      if (!snapshot || snapshot.expires <= Date.now() || typeof snapshot.body !== "string" || !snapshot.cfg || typeof snapshot.source !== "string") return finish("NO_PENDING_TRACK");
+      requestContext = {url: "https://www.youtube.com/api/timedtext?lang=" + encodeURIComponent(snapshot.source)};
+      responseContext = {status: 200, body: snapshot.body, headers: {}};
+    }
+    if (!YTSubs.URL_RE.test(requestContext.url) || !YTSubs.statusOK(responseContext)) return finish("NOT_TARGET");
+    doc = YTSubs.parse(responseContext.body);
     if (!doc.cues.length) return finish("NO_CUES");
     var local = readJSON(SETTINGS, {}), args = YTSubs.args(typeof $argument !== "undefined" ? $argument : null);
-    var cfg = Object.assign({enabled: false, target: "zh-Hans", model: "deepseek-flash", start_seconds: 0}, local, args);
+    var cfg = Object.assign({enabled: false, target: "zh-Hans", model: "deepseek-flash", start_seconds: 0, concurrency: 8, max_calls: 0}, local, args);
+    if (prewarm) cfg = Object.assign(cfg, snapshot.cfg, {enabled: true, start_seconds: 0, max_calls: 0});
+    concurrency = Number(cfg.concurrency);
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 12 || !Number.isInteger(Number(cfg.max_calls)) || Number(cfg.max_calls) < 0) return finish("BAD_CONFIG");
     if (!(cfg.enabled === true || cfg.enabled === "true")) return finish("DISABLED");
     if (!/^[a-zA-Z0-9-]{2,32}$/.test(cfg.target) || !/^[a-zA-Z0-9._-]{1,64}$/.test(cfg.model)) return finish("BAD_CONFIG");
     cfg.start_seconds = Number(cfg.start_seconds);
     if (!Number.isFinite(cfg.start_seconds) || cfg.start_seconds < 0 || cfg.start_seconds > 604800) return finish("BAD_CONFIG");
-    var source = YTSubs.query($request.url, "tlang") || YTSubs.query($request.url, "lang") || "auto";
+    var source = YTSubs.query(requestContext.url, "tlang") || YTSubs.query(requestContext.url, "lang") || "auto";
     if (source.toLowerCase() === cfg.target.toLowerCase()) return finish("SAME_LANGUAGE");
     var cache = Object.create(null);
     loadCache().forEach(function (r) { cache[r.k] = r.v; });
@@ -81,6 +94,12 @@
         else { unique[c.key] = c.id; aliases[c.id] = [c.id]; missing.push(c); }
       }
     });
+    if (!prewarm && missing.length) {
+      var pendingTrack = JSON.stringify({body: responseContext.body, source: source, cfg: {target: cfg.target, model: cfg.model, concurrency: concurrency}, expires: Date.now() + 1800000});
+      if (YTSubs.utf8size(pendingTrack) > 4194304) { write(SNAPSHOT, undefined); log("pending_body_limit"); }
+      else if (!write(SNAPSHOT, pendingTrack)) log("pending_write_failed");
+    }
+    MAX_CALLS = Number(cfg.max_calls) || Math.max(4, missing.length * 3);
     if (!missing.length) return finish("CACHE_OR_NO_ELIGIBLE_CUES");
     var apiKey = String(read(KEY) || "").trim();
     if (!apiKey || /[\s\r\n]/.test(apiKey) || apiKey.indexOf("PASTE_") === 0) return finish("NO_LOCAL_KEY");
@@ -91,16 +110,16 @@
       current.push(c); chars += c.text.length;
     });
     if (current.length) batches.push(current);
-    batches = batches.slice(0, 4);
+    // Every batch remains eligible; time and concurrency, not price, bound execution.
     var recovery = [];
     var next = 0, active = 0, pending = 0, stopped = false, batchFailed = false;
     timer = setTimeout(function () { finish("DEADLINE"); }, Math.max(1, DEADLINE_MS - (Date.now() - started)));
     function pump() {
       if (done) return;
       if (Number(read(COOLDOWN)) > Date.now()) stopped = true;
-      if ((stopped || (next >= batches.length && !recovery.length) || counts.sent >= MAX_CALLS) && active === 0) return finish(stopped || batchFailed ? "API_FALLBACK" : "COMPLETE_BOUNDED");
+      if ((stopped || (next >= batches.length && !recovery.length) || counts.sent >= MAX_CALLS) && active === 0) return finish(stopped || batchFailed ? "API_FALLBACK" : (doc.cues.length === Object.keys(translations).length ? "COMPLETE" : "PARTIAL"));
       // Reserve retry slots and pause new batches during backoff.
-      while (!done && !stopped && !pending && active < 2 && (next < batches.length || recovery.length) && counts.sent < MAX_CALLS) {
+      while (!done && !stopped && !pending && active < concurrency && (next < batches.length || recovery.length) && counts.sent < MAX_CALLS) {
         if (remaining() < MIN_REQUEST_MS) { if (!active) finish("DEADLINE"); return; }
         if (recovery.length) {
           var job = recovery.shift(); send(job.batch, job.id, 2);
@@ -144,6 +163,7 @@
               aliases[c.id].forEach(function (id) { translations[id] = result[c.id]; counts.translated++; });
               additions.push({k: c.key, v: result[c.id], expires: Date.now() + 7 * 86400000});
             });
+            if (prewarm && additions.length >= 96) saveCache();
           }
         } catch (e) {
           if (e && /^(ENVELOPE|COUNT_OR_SHAPE|ID_OR_TEXT|INVALID_JSON|EMPTY_CONTENT)$/.test(e.detail)) detail = e.detail;

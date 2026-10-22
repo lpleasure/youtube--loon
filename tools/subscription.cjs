@@ -11,12 +11,13 @@ if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(config.repository) ||
 const base = `https://raw.githubusercontent.com/${config.repository}/${config.ref}/dist`;
 const out = path.join(root, 'plugins');
 fs.mkdirSync(out, {recursive:true});
-for (const mode of ['probe','translate']) {
+for (const mode of ['probe','translate','prewarm']) {
   for (const legacy of ['', '.legacy']) {
+    if (mode === 'prewarm' && legacy) continue;
     const name = `YouTube-${mode}${legacy}.plugin`;
     const input = fs.readFileSync(path.join(root,'dist',name),'utf8');
-    const body = input.replace(/yt-(probe|translate)\.js/g, `${base}/yt-$1.js`);
+    const body = input.replace(/yt-(probe|translate|prewarm)\.js/g, `${base}/yt-$1.js`);
     fs.writeFileSync(path.join(out,name),body);
   }
 }
-console.log('Prepared 4 remote subscription configurations in plugins/.');
+console.log('Prepared remote response/probe/prewarm subscription configurations in plugins/.');
