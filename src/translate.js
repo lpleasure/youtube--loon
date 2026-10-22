@@ -54,7 +54,7 @@
       saveCache();
       if (doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers($response.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " version=0.1.2 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=0.1.3 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
@@ -62,9 +62,11 @@
     doc = YTSubs.parse($response.body);
     if (!doc.cues.length) return finish("NO_CUES");
     var local = readJSON(SETTINGS, {}), args = YTSubs.args(typeof $argument !== "undefined" ? $argument : null);
-    var cfg = Object.assign({enabled: false, target: "zh-Hans", model: "deepseek-flash"}, local, args);
+    var cfg = Object.assign({enabled: false, target: "zh-Hans", model: "deepseek-flash", start_seconds: 0}, local, args);
     if (!(cfg.enabled === true || cfg.enabled === "true")) return finish("DISABLED");
     if (!/^[a-zA-Z0-9-]{2,32}$/.test(cfg.target) || !/^[a-zA-Z0-9._-]{1,64}$/.test(cfg.model)) return finish("BAD_CONFIG");
+    cfg.start_seconds = Number(cfg.start_seconds);
+    if (!Number.isFinite(cfg.start_seconds) || cfg.start_seconds < 0 || cfg.start_seconds > 604800) return finish("BAD_CONFIG");
     var source = YTSubs.query($request.url, "tlang") || YTSubs.query($request.url, "lang") || "auto";
     if (source.toLowerCase() === cfg.target.toLowerCase()) return finish("SAME_LANGUAGE");
     var cache = Object.create(null);
@@ -74,7 +76,7 @@
     doc.cues.forEach(function (c) {
       c.key = cacheKey(c);
       if (cache[c.key]) { translations[c.id] = cache[c.key]; counts.cached++; }
-      else if (c.text.length <= 800) {
+      else if (c.text.length <= 800 && c.startSeconds >= cfg.start_seconds) {
         if (unique[c.key] !== undefined) aliases[unique[c.key]].push(c.id);
         else { unique[c.key] = c.id; aliases[c.id] = [c.id]; missing.push(c); }
       }
@@ -90,17 +92,21 @@
     });
     if (current.length) batches.push(current);
     batches = batches.slice(0, 4);
+    var recovery = [];
     var next = 0, active = 0, pending = 0, stopped = false, batchFailed = false;
     timer = setTimeout(function () { finish("DEADLINE"); }, Math.max(1, DEADLINE_MS - (Date.now() - started)));
     function pump() {
       if (done) return;
       if (Number(read(COOLDOWN)) > Date.now()) stopped = true;
-      if ((stopped || next >= batches.length || counts.sent >= MAX_CALLS) && active === 0) return finish(stopped || batchFailed ? "API_FALLBACK" : "COMPLETE_BOUNDED");
+      if ((stopped || (next >= batches.length && !recovery.length) || counts.sent >= MAX_CALLS) && active === 0) return finish(stopped || batchFailed ? "API_FALLBACK" : "COMPLETE_BOUNDED");
       // Reserve retry slots and pause new batches during backoff.
-      while (!done && !stopped && !pending && active < 2 && next < batches.length && counts.sent < MAX_CALLS) {
+      while (!done && !stopped && !pending && active < 2 && (next < batches.length || recovery.length) && counts.sent < MAX_CALLS) {
         if (remaining() < MIN_REQUEST_MS) { if (!active) finish("DEADLINE"); return; }
-        var index = next++;
-        send(batches[index], index + 1, 1);
+        if (recovery.length) {
+          var job = recovery.shift(); send(job.batch, job.id, 2);
+        } else {
+          var index = next++; send(batches[index], index + 1, 1);
+        }
       }
     }
     function send(batch, batchID, attempt) {
@@ -122,7 +128,7 @@
         if (Date.now() - started >= DEADLINE_MS) return finish("DEADLINE");
         var status = Number(response && response.status);
         status = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
-        var code = "", retryable = false, cooldownMS = 0;
+        var detail = "NONE", code = "", retryable = false, cooldownMS = 0;
         if (status && status !== 200) {
           if (status === 401 || status === 403) { code = "HTTP_AUTH"; cooldownMS = 300000; }
           else if (status === 429) { code = "HTTP_RATE_LIMIT"; cooldownMS = retryAfter(response); }
@@ -140,25 +146,33 @@
             });
           }
         } catch (e) {
+          if (e && /^(ENVELOPE|COUNT_OR_SHAPE|ID_OR_TEXT|INVALID_JSON|EMPTY_CONTENT)$/.test(e.detail)) detail = e.detail;
           code = /^(API_BODY_LIMIT|API_JSON_OUTER|API_JSON_INNER|API_SCHEMA|API_FINISH_LENGTH|API_FINISH_FILTER|API_FINISH_OTHER)$/.test(e && e.code) ? e.code : "API_VALIDATION";
         }
         if (code) {
           counts.failed++;
-          var retry = retryable && attempt === 1 && !stopped && counts.sent + pending < MAX_CALLS && remaining() >= RETRY_MS + MIN_REQUEST_MS && !(Number(read(COOLDOWN)) > Date.now());
-          log("api_error=" + code + " status=" + status + " batch=" + batchID + " attempt=" + attempt + " elapsed_ms=" + (Date.now() - sentAt) + " timeout_ms=" + timeout + " retry_in_ms=" + (retry ? RETRY_MS : 0) + " cooldown_ms=" + (retry ? 0 : cooldownMS));
+          var recoverable = /^(API_JSON_INNER|API_SCHEMA|API_FINISH_LENGTH)$/.test(code);
+          var split = recoverable && attempt === 1 && batch.length > 1 && !stopped && counts.sent + pending + recovery.length + 2 <= MAX_CALLS && remaining() >= MIN_REQUEST_MS && !(Number(read(COOLDOWN)) > Date.now());
+          if (split) {
+            var middle = Math.ceil(batch.length / 2);
+            recovery.push({batch: batch.slice(0, middle), id: batchID + ".1"}, {batch: batch.slice(middle), id: batchID + ".2"});
+          }
+          if (recoverable && batch.length === 1) retryable = true;
+          var retry = !split && retryable && attempt === 1 && !stopped && counts.sent + pending + recovery.length < MAX_CALLS && remaining() >= RETRY_MS + MIN_REQUEST_MS && !(Number(read(COOLDOWN)) > Date.now());
+          log("api_error=" + code + " status=" + status + " detail=" + detail + " cues=" + batch.length + " action=" + (split ? "split" : retry ? "retry" : "fallback") + " remaining_ms=" + Math.max(0, remaining()) + " batch=" + batchID + " attempt=" + attempt + " elapsed_ms=" + (Date.now() - sentAt) + " timeout_ms=" + timeout + " retry_in_ms=" + (retry ? RETRY_MS : 0) + " cooldown_ms=" + (retry ? 0 : cooldownMS));
           if (retry) {
             active++; pending++;
             setTimeout(function () {
               active--; pending--;
               if (done) return;
               if (stopped || Number(read(COOLDOWN)) > Date.now() || remaining() < MIN_REQUEST_MS || counts.sent >= MAX_CALLS) {
-                batchFailed = true; stopped = true; cooldown(cooldownMS);
+                batchFailed = true; stopped = true; if (cooldownMS) cooldown(cooldownMS);
                 log("retry_skipped batch=" + batchID + " cooldown_ms=" + cooldownMS);
                 pump(); return;
               }
               send(batch, batchID, attempt + 1);
             }, RETRY_MS);
-          } else {
+          } else if (!split) {
             batchFailed = true;
             if (cooldownMS) { stopped = true; cooldown(cooldownMS); }
           }
