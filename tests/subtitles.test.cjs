@@ -160,12 +160,14 @@ for (const [name, transform] of [
   ['invalid outer JSON', () => 'not json'],
   ['truncated finish reason', x => { x.choices[0].finish_reason = 'length'; return x; }],
   ['empty result', x => { x.choices[0].message.content = ''; return x; }],
-  ['missing id', x => { x.choices[0].message.content = '{"translations":[{"id":0,"text":"one"}]}'; return x; }],
+  ['missing id', (x,input) => { x.choices[0].message.content = JSON.stringify({translations:input.slice(1).map(c=>({id:c.id,text:'one'}))}); return x; }],
   ['duplicate id', x => { x.choices[0].message.content = '{"translations":[{"id":0,"text":"one"},{"id":0,"text":"two"}]}'; return x; }],
   ['unknown id', x => { x.choices[0].message.content = '{"translations":[{"id":0,"text":"one"},{"id":9,"text":"two"}]}'; return x; }]
 ]) test(`${name}: rejects whole batch, no bad cache`, () => {
-  const h = harness(); h.respond(0, transform); assert.deepEqual(h.results,[{}]); assert.equal(h.store['ytloon.cache.v1'],undefined);
-  assert.equal(h.store['ytloon.cooldown.v1'], undefined); assert.equal(h.calls.length, 1);
+  const h = harness(); h.respond(0, transform);
+  for (let i=1; i<h.calls.length; i++) h.respond(i,transform);
+  assert.deepEqual(h.results,[{}]); assert.equal(h.store['ytloon.cache.v1'],undefined);
+  assert.equal(h.store['ytloon.cooldown.v1'], undefined); assert.ok(h.calls.length <= 3);
   assert.equal(harness('translate', {store:h.store}).calls.length, 1);
 });
 test('global deadline ignores late and duplicate callbacks; done exactly once', () => {
@@ -414,10 +416,11 @@ for (const [code, transform] of [
   ['API_BODY_LIMIT',()=> 'x'.repeat(100001)]
 ]) test('safe actionable validator classification: '+code, () => {
   const h=harness(); h.respond(0,transform);
+  for (let i=1; i<h.calls.length; i++) h.respond(i,transform);
   assert.ok(h.logs.some(x=>x.includes('api_error='+code+' status=200')));
   assert.equal(h.logs.join(' ').includes('PRIVATE_SENTINEL'),false);
   assert.equal(h.store['ytloon.cache.v1'],undefined); assert.equal(h.store['ytloon.cooldown.v1'],undefined);
-  assert.deepEqual(h.results,[{}]); assert.equal(h.calls.length,1);
+  assert.deepEqual(h.results,[{}]); assert.ok(h.calls.length<=3);
 });
 
 test('timeout retry fits remaining time, with 500ms margin inside the 22s deadline', () => {
@@ -474,4 +477,86 @@ test('diagnostics never include key, Authorization, subtitle text, signed URL or
   h.advance(750); httpFailure(h,1,503);
   const logs=h.logs.join(' ');
   for (const secret of ['Authorization','TEST_ONLY_NOT_A_REAL_CREDENTIAL','PRIVATE_SUBTITLE','PRIVATE_SENTINEL','PRIVATE_SERVER_BODY']) assert.equal(logs.includes(secret),false);
+});
+
+const innerFailure = x => { x.choices[0].message.content='{PRIVATE_SENTINEL'; return x; };
+const inputOf = call => JSON.parse(JSON.parse(call.options.body).messages[1].content).subtitles;
+for (const [code,change] of [
+  ['API_JSON_INNER',innerFailure],
+  ['API_SCHEMA',x=>{x.choices[0].message.content='{"translations":[]}';return x;}],
+  ['API_FINISH_LENGTH',x=>{x.choices[0].finish_reason='length';return x;}]
+]) test(code+' splits once and caches validated child replies',()=>{
+  const h=harness('translate',{body:manyCues(24)});
+  h.respond(0,change); assert.equal(h.calls.length,3);
+  assert.equal(inputOf(h.calls[1]).length,12); assert.equal(inputOf(h.calls[2]).length,12);
+  assert.deepEqual(inputOf(h.calls[1]).concat(inputOf(h.calls[2])),inputOf(h.calls[0]));
+  assert.equal(h.store['ytloon.cache.v1'],undefined);
+  h.respond(1); h.respond(2);
+  assert.equal(JSON.parse(h.store['ytloon.cache.v1']).length,24);
+  assert.ok(h.logs.some(s=>s.includes('action=split')&&s.includes('cues=24')));
+  assert.equal(h.results.length,1);
+});
+test('failed child cannot split again; valid sibling survives',()=>{
+  const h=harness(); h.respond(0,innerFailure); h.respond(1,innerFailure); h.respond(2);
+  assert.equal(h.calls.length,3); assert.equal(h.results.length,1);
+  assert.equal(JSON.parse(h.store['ytloon.cache.v1']).length,1);
+  assert.deepEqual(JSON.parse(h.results[0].body).events[1].segs,JSON.parse(fixture('json3')).events[1].segs);
+});
+test('single cue retries validation once after backoff',()=>{
+  const h=harness('translate',{body:manyCues(1)}); h.respond(0,innerFailure);
+  h.advance(749); assert.equal(h.calls.length,1); h.advance(1); h.respond(1);
+  assert.equal(h.calls.length,2); assert.ok(h.results[0].body.includes('译文'));
+  const b=harness('translate',{body:manyCues(1)}); b.respond(0,innerFailure); b.advance(750); b.respond(1,innerFailure);
+  assert.deepEqual(b.results,[{}]); assert.equal(b.calls.length,2);
+});
+test('parallel malformed batches and late recovery respect budget/deadline',()=>{
+  const h=harness('translate',{body:manyCues(100)});
+  h.respond(0,innerFailure); h.respond(1,innerFailure);
+  assert.equal(h.calls.length,4); h.respond(2); h.respond(3);
+  assert.equal(h.calls.length,4); assert.equal(h.results.length,1);
+  const b=harness(); b.elapse(18000); b.respond(0,innerFailure);
+  assert.equal(b.calls.length,1); assert.deepEqual(b.results,[{}]);
+});
+test('auth during split stops queued child',()=>{
+  const h=harness('translate',{body:manyCues(100)}); h.respond(0,innerFailure);
+  httpFailure(h,1,401); h.respond(2); assert.equal(h.calls.length,3);
+  assert.equal(h.results.length,1); assert.ok(h.results[0].body.includes('译文'));
+});
+test('manual start prioritizes later cues and cache remains reusable',()=>{
+  const h=harness('translate',{body:manyCues(150),args:{enabled:true,start_seconds:100}});
+  assert.equal(inputOf(h.calls[0])[0].id,100);
+  for(let i=0;i<h.calls.length;i++) h.respond(i);
+  const out=JSON.parse(h.results[0].body); assert.equal(out.events[0].segs[0].utf8,'cue 0');
+  assert.ok(out.events[149].segs[0].utf8.includes('译文'));
+  const b=harness('translate',{body:manyCues(150),store:h.store});
+  assert.equal(inputOf(b.calls[0])[0].id,0);
+  for(let i=0;i<b.calls.length;i++) b.respond(i);
+  assert.ok(JSON.parse(b.results[0].body).events[149].segs[0].utf8.includes('译文'));
+});
+test('repeat request advances past the first 96 cached cues',()=>{
+  const h=harness('translate',{body:manyCues(150)}); for(let i=0;i<h.calls.length;i++) h.respond(i);
+  const b=harness('translate',{body:manyCues(150),store:h.store});
+  assert.equal(inputOf(b.calls[0])[0].id,96);
+  for(let i=0;i<b.calls.length;i++) b.respond(i);
+  assert.ok(JSON.parse(b.results[0].body).events[149].segs[0].utf8.includes('译文'));
+});
+test('all subtitle formats expose timing and reject invalid start settings',()=>{
+  for(const format of ['json3','srv1','srv3','vtt']) {
+    const cues=C.parse(fixture(format)).cues; assert.equal(cues[0].startSeconds,1); assert.equal(cues[1].startSeconds,4);
+    const h=harness('translate',{body:fixture(format),args:{enabled:true,start_seconds:3}});
+    assert.equal(inputOf(h.calls[0])[0].id,1); h.respond(); assert.equal(h.results.length,1);
+  }
+  for(const value of ['bad',-1,604801,'Infinity']) assert.equal(harness('translate',{args:{enabled:true,start_seconds:value}}).calls.length,0);
+});
+test('remote subscriptions use configured branch and bundles match source',()=>{
+  const config=require('../subscription.json');
+  for(const mode of ['translate','probe']) {
+    const script=fs.readFileSync(path.join(root,'dist','yt-'+mode+'.js'),'utf8');
+    assert.ok(script.endsWith(fs.readFileSync(path.join(root,'src/'+mode+'.js'),'utf8')));
+    assert.ok(script.includes(fs.readFileSync(path.join(root,'src/core.js'),'utf8')));
+    for(const legacy of ['', '.legacy']) {
+      const plugin=fs.readFileSync(path.join(root,'plugins','YouTube-'+mode+legacy+'.plugin'),'utf8');
+      assert.ok(plugin.includes('https://raw.githubusercontent.com/'+config.repository+'/'+config.ref+'/dist/yt-'+mode+'.js'));
+    }
+  }
 });
