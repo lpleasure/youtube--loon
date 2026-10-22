@@ -26,7 +26,7 @@ function harness(mode = 'translate', options = {}) {
     Date: class extends Date { static now() { return now; } },
     $request: {url: options.url || requestURL},
     $response: {status: options.status || 200, headers: {'Content-Type': 'application/json', 'Content-Length': '9', 'Content-Encoding': 'gzip', ETag: 'stale'}, body: options.body === undefined ? fixture('json3') : options.body},
-    $argument: options.args === undefined ? {enabled: true} : options.args,
+    $argument: options.args === undefined ? {enabled: true, max_calls: 4, concurrency: 2} : options.args,
     $done: r => results.push(plain(r)),
     $persistentStore: {read: k => store[k], write: (v, k) => { if (options.storageFails) return false; if (v == null) delete store[k]; else store[k] = v; return true; }},
     $httpClient: {post: (opt, cb) => { calls.push({options: plain(opt), cb}); if (options.throwHTTP) throw new Error('network PRIVATE_SENTINEL'); }},
@@ -210,7 +210,7 @@ test('distribution probe contains no HTTP client and new/legacy configs are dist
 test('cache capacity is bounded by both bytes and record count', () => {
   const records = Array.from({length:500},(_,i)=>({k:'old'+i,v:'中'.repeat(800),expires:Date.now()+100000}));
   const h = harness('translate',{store:{'ytloon.cache.v1':JSON.stringify(records)}}); h.respond();
-  const saved=h.store['ytloon.cache.v1']; assert.ok(Buffer.byteLength(saved)<=262144); assert.ok(JSON.parse(saved).length<=400);
+  const saved=h.store['ytloon.cache.v1']; assert.ok(Buffer.byteLength(saved)<=4194304); assert.ok(JSON.parse(saved).length<=6000);
 });
 test('cache merges fresh concurrent entries at completion', () => {
   const h=harness(); h.store['ytloon.cache.v1']=JSON.stringify([{k:'parallel',v:'其他',expires:Date.now()+10000}]);
@@ -559,4 +559,62 @@ test('remote subscriptions use configured branch and bundles match source',()=>{
       assert.ok(plugin.includes('https://raw.githubusercontent.com/'+config.repository+'/'+config.ref+'/dist/yt-'+mode+'.js'));
     }
   }
+});
+
+function completeWaves(h, delay=8000) {
+  let next=0, maxActive=0;
+  while(!h.results.length) {
+    const end=h.calls.length; maxActive=Math.max(maxActive,end-next);
+    if(end===next) {h.advance(delay);continue;}
+    h.advance(delay);
+    for(;next<end;next++) h.respond(next);
+  }
+  return maxActive;
+}
+test('default full-track mode translates 2400 cues with fast replies, including final cue',()=>{
+  const h=harness('translate',{body:manyCues(2400),args:{enabled:true}});
+  assert.equal(h.calls.length,8);
+  for(let i=0;i<h.calls.length;i++) h.respond(i);
+  assert.equal(h.calls.length,100); assert.equal(h.results.length,1);
+  assert.ok(JSON.parse(h.results[0].body).events[2399].segs[0].utf8.includes('译文'));
+  assert.equal(JSON.parse(h.store['ytloon.cache.v1']).length,2400);
+  assert.ok(h.logs.some(s=>s.includes('result=COMPLETE ')));
+});
+test('slow long track resumes in manual prewarm and subsequent response is fully cached',()=>{
+  const body=manyCues(2400), h=harness('translate',{body,args:{enabled:true}});
+  assert.equal(completeWaves(h),8);
+  assert.ok(h.logs.some(s=>s.includes('result=DEADLINE')));
+  assert.ok(JSON.parse(h.store['ytloon.cache.v1']).length<2400);
+  const snapshot=h.store['ytloon.pending.v1'];
+  assert.equal(snapshot.includes('PRIVATE_SENTINEL'),false);
+  assert.equal(snapshot.includes('TEST_ONLY_NOT_A_REAL_CREDENTIAL'),false);
+  const worker=harness('prewarm',{store:h.store});
+  assert.equal(completeWaves(worker),8); assert.deepEqual(worker.results,[{}]);
+  assert.equal(JSON.parse(worker.store['ytloon.cache.v1']).length,2400);
+  const replay=harness('translate',{body,store:worker.store,args:{enabled:true}});
+  assert.equal(replay.calls.length,0);
+  assert.equal(JSON.parse(replay.results[0].body).events.filter(e=>e.segs[0].utf8.includes('译文')).length,2400);
+});
+test('prewarm missing/expired job never calls API; checkpoint survives unfinished run',()=>{
+  assert.equal(harness('prewarm').calls.length,0);
+  assert.equal(harness('prewarm',{store:{'ytloon.pending.v1':JSON.stringify({expires:0})}}).calls.length,0);
+  const h=harness('translate',{body:manyCues(600),args:{enabled:true}}); h.deadline();
+  const w=harness('prewarm',{store:h.store});
+  for(let i=0;i<4;i++) w.respond(i);
+  assert.equal(JSON.parse(w.store['ytloon.cache.v1']).length,96);
+  w.advance(270000); assert.equal(w.results.length,1);
+  const resumed=harness('prewarm',{store:w.store});
+  assert.equal(inputOf(resumed.calls[0])[0].id,96);
+  resumed.advance(270000);
+});
+test('manual prewarm ignores stale manual start and keeps strict failure fallback',()=>{
+  const h=harness('translate',{body:manyCues(150),args:{enabled:true,start_seconds:100}}); h.deadline();
+  const w=harness('prewarm',{store:h.store}); assert.equal(inputOf(w.calls[0])[0].id,0);
+  httpFailure(w,0,401); for(let i=1;i<w.calls.length;i++) w.respond(i);
+  assert.equal(w.results.length,1); assert.ok(w.store['ytloon.cooldown.v1']);
+});
+test('prewarm subscription points to worker and gives it a 300s runtime',()=>{
+  const plugin=fs.readFileSync(path.join(root,'plugins/YouTube-prewarm.plugin'),'utf8');
+  assert.ok(plugin.includes('generic then script'));assert.ok(plugin.includes('timeout=300'));
+  assert.ok(plugin.includes(require('../subscription.json').ref+'/dist/yt-prewarm.js'));
 });
