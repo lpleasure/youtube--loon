@@ -87,7 +87,7 @@ test('VTT final newline does not create a detached translated block', () => {
 });
 for (const [name, body] of [
   ['invalid JSON', '{oops'], ['HTML error', '<html>error</html>'], ['binary', new Uint8Array([1,2])],
-  ['empty body', ''], ['body limit', 'x'.repeat(1000001)], ['protobuf-like', '\u0000\u0001abc'],
+  ['empty body', ''], ['body limit', 'x'.repeat(4000001)], ['protobuf-like', '\u0000\u0001abc'],
   ['rolling JSON', JSON.stringify({events: [{aAppend: 1}]})],
   ['rolling XML', '<timedtext format="3"><body><p a="1" t="0" d="2">a</p></body></timedtext>'],
   ['DTD', '<!DOCTYPE x><transcript></transcript>'],
@@ -617,4 +617,27 @@ test('prewarm subscription points to worker and gives it a 300s runtime',()=>{
   const plugin=fs.readFileSync(path.join(root,'plugins/YouTube-prewarm.plugin'),'utf8');
   assert.ok(plugin.includes('generic then script'));assert.ok(plugin.includes('timeout=300'));
   assert.ok(plugin.includes(require('../subscription.json').ref+'/dist/yt-prewarm.js'));
+});
+
+test('four-hour 14400-cue track survives prewarm and fully cached replay',()=>{
+ const body=manyCues(14400), capture=harness('translate',{body,args:{enabled:true}}); capture.deadline();
+ const worker=harness('prewarm',{store:capture.store});
+ for(let i=0;i<worker.calls.length;i++) worker.respond(i);
+ assert.equal(JSON.parse(worker.store['ytloon.cache.v1']).length,14400);
+ const replay=harness('translate',{body,store:worker.store,args:{enabled:true}});
+ assert.equal(replay.calls.length,0);
+ assert.equal(JSON.parse(replay.results[0].body).events.filter(e=>e.segs[0].utf8.includes('译文')).length,14400);
+});
+test('prewarm recovers missing callback and ignores late original success',()=>{
+ const h=harness('translate',{body:manyCues(48),args:{enabled:true}});h.deadline();
+ const w=harness('prewarm',{store:h.store}); w.respond(1); w.advance(30750);
+ assert.equal(w.calls.length,3);w.respond(2);const saved=w.store['ytloon.cache.v1'];w.respond(0);
+ assert.equal(w.store['ytloon.cache.v1'],saved);assert.equal(w.results.length,1);
+ assert.equal(JSON.parse(saved).length,48);
+});
+test('prewarm repeated transient failure does not abandon later batches',()=>{
+ const h=harness('translate',{body:manyCues(240),args:{enabled:true,concurrency:1}});h.deadline();
+ const w=harness('prewarm',{store:h.store});httpFailure(w,0,503);w.advance(750);httpFailure(w,1,503);
+ for(let i=2;i<w.calls.length;i++) w.respond(i);
+ assert.equal(w.results.length,1);assert.equal(JSON.parse(w.store['ytloon.cache.v1']).length,216);
 });

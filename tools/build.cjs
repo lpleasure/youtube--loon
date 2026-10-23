@@ -21,6 +21,6 @@ for (const mode of ['probe', 'translate', 'prewarm']) {
   fs.writeFileSync(path.join(out, `YouTube-${mode}.plugin`), common + '#!loon_version = 3.5.1(983)\n' + args + `[Script]\nresponse if \${url} ~= /${regex}/ then script("yt-${mode}.js"${params}) with requires_body=true, binary_body_mode=false, timeout=${mode === 'probe' ? 5 : 25}, tag="YTSubs ${mode}"\n` + mitm);
   fs.writeFileSync(path.join(out, `YouTube-${mode}.legacy.plugin`), common + '# 旧版 Script 语法；翻译设置由手机本地 setup 脚本写入。\n[Script]\n' + `http-response ${regex} script-path=yt-${mode}.js,requires-body=true,binary-body-mode=false,timeout=${mode === 'probe' ? 5 : 25},tag=YTSubs ${mode}\n` + mitm);
 }
-fs.writeFileSync(path.join(out, 'YouTube-prewarm.plugin'), '#!name = YouTube 最近字幕预翻译\n#!desc = 0.1.4；手动运行，最长约 270 秒；完成后重新请求字幕\n[Script]\ngeneric then script("yt-prewarm.js") with timeout=300, tag="YTSubs prewarm"\n');
+fs.writeFileSync(path.join(out, 'YouTube-prewarm.plugin'), '#!name = YouTube 最近字幕预翻译\n#!desc = 0.1.5；手动运行，最长约 270 秒；完成后重新请求字幕\n[Script]\ngeneric then script("yt-prewarm.js") with timeout=300, tag="YTSubs prewarm"\n');
 console.log('Built response/probe/prewarm scripts and plugin configurations.');
 if (fs.existsSync(path.join(root, 'subscription.json'))) require('./subscription.cjs');

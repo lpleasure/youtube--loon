@@ -1,4 +1,4 @@
-/* YT Loon 0.1.4 EXPERIMENTAL. Generated: edit src/, run npm run build. */
+/* YT Loon 0.1.5 EXPERIMENTAL. Generated: edit src/, run npm run build. */
 /* Original implementation. No dependencies; shared by Node tests and Loon bundles. */
 var YTSubs = (function () {
   "use strict";
@@ -75,7 +75,7 @@ var YTSubs = (function () {
   }
   function parse(body) {
     if (typeof body !== "string" || !body.trim()) fail("EMPTY_OR_BINARY");
-    if (body.length > 1000000) fail("BODY_LIMIT");
+    if (body.length > 4000000) fail("BODY_LIMIT");
     if (body.indexOf(MARKER) !== -1) fail("ALREADY_PROBED");
     var s = body.replace(/^\uFEFF/, "").trim();
     if (s[0] === "{") return json3(body);

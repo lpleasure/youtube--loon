@@ -1,6 +1,6 @@
 {
   "name": "youtube-loon-deepseek-experimental",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Experimental Loon subtitle response injection; iPhone validation pending",
   "scripts": {
