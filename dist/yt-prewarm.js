@@ -1,4 +1,4 @@
-/* YT Loon 1.0.2. Generated: edit src/, run npm run build. */
+/* YT Loon 1.0.3. Generated: edit src/, run npm run build. */
 /* Original implementation. No dependencies; shared by Node tests and Loon bundles. */
 var YTSubs = (function () {
   "use strict";
@@ -83,8 +83,47 @@ var YTSubs = (function () {
   }
   // Sentence reconstruction is restricted to word-timed JSON3 tracks.
   // No estimated character timings: unsupported timing remains unchanged.
+  function srvSentenceParse(body, original) {
+    var events = [], windows = Object.create(null), estimated = false;
+    body.replace(/<p\b([^>]*)>([\s\S]*?)<\/p\s*>/g, function (_, attrs, inner) {
+      var start = Number(attr("<p " + attrs + ">", "t")), duration = Number(attr("<p " + attrs + ">", "d"));
+      windows[attr("<p " + attrs + ">", "w") || "default"] = true;
+      var spans = [], match, re = /<s\b([^>]*)>([\s\S]*?)<\/s\s*>/g;
+      while ((match = re.exec(inner))) {
+        var offset = attr("<s " + match[1] + ">", "t");
+        spans.push({offset: offset === undefined ? null : Number(offset), text: decode(match[2].replace(/<br\s*\/>/g, " "))});
+      }
+      if (!spans.length) spans = [{offset: 0, text: decode(inner.replace(/<br\s*\/>/g, " "))}];
+      // Missing word timing is estimated inside the original cue only.
+      // Do not claim forced alignment to audio.
+      if (spans.some(function (x, i) { return x.offset === null || !Number.isFinite(x.offset) || x.offset < 0 || x.offset >= duration || (i && x.offset <= spans[i-1].offset); })) {
+        estimated = true; spans = [{offset: 0, text: decode(inner.replace(/<br\s*\/>/g, " ").replace(/<\/?s\b[^>]*>/g, ""))}];
+      }
+      var segs = [];
+      spans.forEach(function (span, i) {
+        var words = span.text.match(/\S+\s*/g) || [], end = i + 1 < spans.length ? spans[i+1].offset : duration;
+        var weight = words.reduce(function (n, w) { return n + w.length; }, 0), used = 0;
+        words.forEach(function (word) {
+          if (words.length > 1) estimated = true;
+          segs.push({utf8: word, tOffsetMs: span.offset + (end-span.offset) * used / weight}); used += word.length;
+        });
+      });
+      events.push({tStartMs: start, dDurationMs: duration, segs: segs}); return _;
+    });
+    if (Object.keys(windows).length > 1) { original.sentenceMode = "fallback_multiwindow"; return original; }
+    var normalized = JSON.stringify({events: events}), rebuilt = sentenceParse(normalized);
+    if (!rebuilt.sentenceMode) { original.sentenceMode = "fallback_timing"; return original; }
+    return {format: "srv3", cues: rebuilt.cues, sentenceMode: estimated ? "srv3_estimated" : "srv3_wordtimed", render: function (translations) {
+      if (!Object.keys(translations).length) return body;
+      var doc = JSON.parse(rebuilt.render(translations));
+      return '<timedtext format="3"><head><wp id="0" ap="7" ah="50" av="95"/><ws id="0" ju="2"/></head><body>' + doc.events.map(function (e) {
+        return '<p t="' + Math.round(e.tStartMs) + '" d="' + Math.max(1, Math.round(e.dDurationMs)) + '" wp="0" ws="0"><s>' + escapeXML(e.segs[0].utf8) + '</s></p>';
+      }).join("") + '</body></timedtext>';
+    }};
+  }
   function sentenceParse(body) {
     var original = parse(body);
+    if (original.format === "srv3") return srvSentenceParse(body, original);
     if (original.format !== "json3") return original;
     var source = JSON.parse(body.replace(/^\uFEFF/, "")), events = source.events.filter(function (e) { return e.segs && e.segs.some(function (s) { return s.utf8.trim(); }); });
     var timed = 0, windowID;
@@ -120,6 +159,7 @@ var YTSubs = (function () {
     var normalized = {events: rebuilt};
     var result = parse(JSON.stringify(normalized));
     // With no translations, keep the exact upstream response.
+    result.sentenceMode = "json3_wordtimed";
     var render = result.render;
     result.render = function (translations) { return Object.keys(translations).length ? render(translations) : body; };
     return result;
@@ -359,7 +399,7 @@ var YTSubsPrewarm = true;
       saveCache();
       if (!prewarm && doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers(responseContext.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.2 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " sentence=" + (doc && doc.sentenceMode || "fallback") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.3 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
@@ -384,7 +424,7 @@ var YTSubsPrewarm = true;
     if (source.toLowerCase() === cfg.target.toLowerCase()) return finish("SAME_LANGUAGE");
     var cache = Object.create(null);
     loadCache().forEach(function (r) { cache[r.k] = r.v; });
-    function cacheKey(c) { return JSON.stringify(["prompt-v1", cfg.model, cfg.target, source, c.text]); }
+    function cacheKey(c) { return JSON.stringify([doc.sentenceMode && doc.format === "srv3" ? "prompt-srv3-sentence-v1" : "prompt-v1", cfg.model, cfg.target, source, c.text]); }
     var missing = [], unique = Object.create(null), aliases = Object.create(null);
     doc.cues.forEach(function (c) {
       c.key = cacheKey(c);
