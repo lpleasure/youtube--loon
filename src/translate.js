@@ -58,7 +58,7 @@
       saveCache();
       if (!prewarm && doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers(responseContext.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.0 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.2 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
@@ -69,7 +69,7 @@
       responseContext = {status: 200, body: snapshot.body, headers: {}};
     }
     if (!YTSubs.URL_RE.test(requestContext.url) || !YTSubs.statusOK(responseContext)) return finish("NOT_TARGET");
-    doc = YTSubs.parse(responseContext.body);
+    doc = YTSubs.sentenceParse(responseContext.body);
     if (!doc.cues.length) return finish("NO_CUES");
     var local = readJSON(SETTINGS, {}), args = YTSubs.args(typeof $argument !== "undefined" ? $argument : null);
     var cfg = Object.assign({enabled: false, target: "zh-Hans", model: "deepseek-flash", start_seconds: 0, concurrency: 8, max_calls: 0}, local, args);
