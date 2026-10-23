@@ -58,7 +58,7 @@
       saveCache();
       if (!prewarm && doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers(responseContext.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.0 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.1 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {

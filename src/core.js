@@ -102,6 +102,22 @@ var YTSubs = (function () {
       cues.forEach(function (c) {
         if (translations[c.id]) clone.events[c.index].segs = [{utf8: bilingual(c.text, translations[c.id])}];
       });
+      // Whole bilingual cues replace word-timed segments. Adjacent cues in the
+      // same window must not remain active together after replacement.
+      var windows = Object.create(null);
+      cues.forEach(function (c) {
+        var e = clone.events[c.index], key = String(e.wWinId === undefined ? "default" : e.wWinId);
+        (windows[key] || (windows[key] = [])).push(c);
+      });
+      Object.keys(windows).forEach(function (key) {
+        var ordered = windows[key].slice().sort(function (a, b) { return a.startSeconds - b.startSeconds || a.id - b.id; });
+        for (var i = 0; i + 1 < ordered.length; i++) {
+          var current = ordered[i], next = ordered[i + 1];
+          var event = clone.events[current.index], nextEvent = clone.events[next.index];
+          var gap = nextEvent.tStartMs - event.tStartMs;
+          if (gap > 0 && (translations[current.id] || translations[next.id]) && event.dDurationMs > gap) event.dDurationMs = gap;
+        }
+      });
       centerJSON(clone);
       return JSON.stringify(clone);
     }};

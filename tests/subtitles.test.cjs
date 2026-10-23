@@ -604,3 +604,21 @@ test('prewarm repeated transient failure does not abandon later batches',()=>{
  assert.equal(w.results.length,1);assert.equal(JSON.parse(w.store['ytloon.cache.v1']).length,216);
 });
 test('release ignores old start offsets',()=>{const h=harness('translate',{body:manyCues(2),args:{enabled:true,start_seconds:100}});assert.equal(inputOf(h.calls[0])[0].id,0);h.respond();assert.equal(h.results.length,1);});
+
+test('overlapping same-window bilingual cues stop at next start without shifting text IDs',()=>{
+ const input={events:[{tStartMs:0,dDurationMs:5000,wWinId:1,segs:[{utf8:'Look at their gym leader.'}]},{tStartMs:2000,dDurationMs:4000,wWinId:1,segs:[{utf8:'Shirtless and ripped.'}]}]};
+ const out=JSON.parse(C.parse(JSON.stringify(input)).render({0:'看看他们的道馆馆主。',1:'赤膊又健壮。'}));
+ assert.equal(out.events[0].dDurationMs,2000);assert.equal(out.events[1].dDurationMs,4000);
+ assert.equal(out.events[1].segs[0].utf8,'赤膊又健壮。\nShirtless and ripped.');
+ assert.equal(out.events[1].tStartMs,2000);
+});
+test('overlap repair preserves separate windows, gaps, simultaneous starts and passthrough',()=>{
+ const input={events:[{tStartMs:0,dDurationMs:5000,wWinId:1,segs:[{utf8:'A'}]},{tStartMs:1000,dDurationMs:500,wWinId:2,segs:[{utf8:'B'}]},{tStartMs:6000,dDurationMs:1000,wWinId:1,segs:[{utf8:'C'}]},{tStartMs:6000,dDurationMs:1000,wWinId:1,segs:[{utf8:'D'}]}]};
+ const body=JSON.stringify(input),doc=C.parse(body);assert.equal(doc.render({}),body);
+ const out=JSON.parse(doc.render({0:'甲',1:'乙',2:'丙',3:'丁'}));
+ assert.deepEqual(out.events.map(e=>[e.tStartMs,e.dDurationMs]),input.events.map(e=>[e.tStartMs,e.dDurationMs]));
+});
+test('overlap repair uses time order and also clears preceding untranslated cue',()=>{
+ const body=JSON.stringify({events:[{tStartMs:2000,dDurationMs:1000,segs:[{utf8:'B'}]},{tStartMs:0,dDurationMs:5000,segs:[{utf8:'A'}]}]});
+ const out=JSON.parse(C.parse(body).render({0:'乙'}));assert.equal(out.events[1].dDurationMs,2000);assert.equal(out.events[1].segs[0].utf8,'A');
+});

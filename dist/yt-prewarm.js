@@ -1,4 +1,4 @@
-/* YT Loon 1.0.0. Generated: edit src/, run npm run build. */
+/* YT Loon 1.0.1. Generated: edit src/, run npm run build. */
 /* Original implementation. No dependencies; shared by Node tests and Loon bundles. */
 var YTSubs = (function () {
   "use strict";
@@ -102,6 +102,22 @@ var YTSubs = (function () {
       var clone = JSON.parse(body.replace(/^\uFEFF/, ""));
       cues.forEach(function (c) {
         if (translations[c.id]) clone.events[c.index].segs = [{utf8: bilingual(c.text, translations[c.id])}];
+      });
+      // Whole bilingual cues replace word-timed segments. Adjacent cues in the
+      // same window must not remain active together after replacement.
+      var windows = Object.create(null);
+      cues.forEach(function (c) {
+        var e = clone.events[c.index], key = String(e.wWinId === undefined ? "default" : e.wWinId);
+        (windows[key] || (windows[key] = [])).push(c);
+      });
+      Object.keys(windows).forEach(function (key) {
+        var ordered = windows[key].slice().sort(function (a, b) { return a.startSeconds - b.startSeconds || a.id - b.id; });
+        for (var i = 0; i + 1 < ordered.length; i++) {
+          var current = ordered[i], next = ordered[i + 1];
+          var event = clone.events[current.index], nextEvent = clone.events[next.index];
+          var gap = nextEvent.tStartMs - event.tStartMs;
+          if (gap > 0 && (translations[current.id] || translations[next.id]) && event.dDurationMs > gap) event.dDurationMs = gap;
+        }
       });
       centerJSON(clone);
       return JSON.stringify(clone);
@@ -300,7 +316,7 @@ var YTSubsPrewarm = true;
       saveCache();
       if (!prewarm && doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers(responseContext.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.0 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.1 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
