@@ -42,10 +42,10 @@
     // Reload before merge to reduce lost updates; Loon storage has no transaction API.
     var entries = loadCache(), latest = Object.create(null);
     entries.concat(additions).forEach(function (r) { latest[r.k] = r; });
-    entries = Object.keys(latest).map(function (k) { return latest[k]; }).sort(function (a, b) { return a.expires - b.expires; }).slice(-6000);
+    entries = Object.keys(latest).map(function (k) { return latest[k]; }).sort(function (a, b) { return a.expires - b.expires; }).slice(-20000);
     var sizes = entries.map(function (r) { return YTSubs.utf8size(JSON.stringify(r)); });
     var bytes = sizes.reduce(function (sum, n) { return sum + n; }, 2 + Math.max(0, entries.length - 1));
-    while (entries.length && bytes > 4194304) { bytes -= sizes.shift() + (entries.length > 1 ? 1 : 0); entries.shift(); }
+    while (entries.length && bytes > 16777216) { bytes -= sizes.shift() + (entries.length > 1 ? 1 : 0); entries.shift(); }
     if (!write(CACHE, JSON.stringify(entries))) log("cache_write_failed");
     else additions = [];
   }
@@ -58,7 +58,7 @@
       saveCache();
       if (!prewarm && doc && Object.keys(translations).length) response = {body: doc.render(translations), headers: YTSubs.headers(responseContext.headers)};
     } catch (_) { response = {}; reason = "OUTPUT_ERROR"; }
-    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=0.1.4 elapsed_ms=" + (Date.now() - started));
+    log("result=" + reason + " mode=" + (prewarm ? "prewarm" : "response") + " total=" + (doc ? doc.cues.length : 0) + " format=" + (doc ? doc.format : "unknown") + " cached=" + counts.cached + " sent=" + counts.sent + " translated=" + counts.translated + " failed=" + counts.failed + " untranslated=" + (doc ? doc.cues.length - Object.keys(translations).length : 0) + " version=1.0.0 elapsed_ms=" + (Date.now() - started));
     $done(response);
   }
   try {
@@ -78,8 +78,7 @@
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 12 || !Number.isInteger(Number(cfg.max_calls)) || Number(cfg.max_calls) < 0) return finish("BAD_CONFIG");
     if (!(cfg.enabled === true || cfg.enabled === "true")) return finish("DISABLED");
     if (!/^[a-zA-Z0-9-]{2,32}$/.test(cfg.target) || !/^[a-zA-Z0-9._-]{1,64}$/.test(cfg.model)) return finish("BAD_CONFIG");
-    cfg.start_seconds = Number(cfg.start_seconds);
-    if (!Number.isFinite(cfg.start_seconds) || cfg.start_seconds < 0 || cfg.start_seconds > 604800) return finish("BAD_CONFIG");
+    cfg.start_seconds = 0; // Ignore obsolete local/plugin start offsets.
     var source = YTSubs.query(requestContext.url, "tlang") || YTSubs.query(requestContext.url, "lang") || "auto";
     if (source.toLowerCase() === cfg.target.toLowerCase()) return finish("SAME_LANGUAGE");
     var cache = Object.create(null);
@@ -96,7 +95,7 @@
     });
     if (!prewarm && missing.length) {
       var pendingTrack = JSON.stringify({body: responseContext.body, source: source, cfg: {target: cfg.target, model: cfg.model, concurrency: concurrency}, expires: Date.now() + 1800000});
-      if (YTSubs.utf8size(pendingTrack) > 4194304) { write(SNAPSHOT, undefined); log("pending_body_limit"); }
+      if (YTSubs.utf8size(pendingTrack) > 16777216) { write(SNAPSHOT, undefined); log("pending_body_limit"); }
       else if (!write(SNAPSHOT, pendingTrack)) log("pending_write_failed");
     }
     MAX_CALLS = Number(cfg.max_calls) || Math.max(4, missing.length * 3);
@@ -139,10 +138,12 @@
           {role: "user", content: JSON.stringify({source_language: source, subtitles: batch.map(function (c) { return {id: c.id, text: c.text}; })})}
         ]
       };
-      var settled = false;
+      var settled = false, requestTimer;
+      if (prewarm) requestTimer = setTimeout(function () { callback("ETIMEDOUT", null, null); }, timeout);
       function callback(error, response, data) {
         if (done || settled) return;
         settled = true; active--;
+        if (requestTimer && typeof clearTimeout === "function") clearTimeout(requestTimer);
         // Enforce the deadline even when the runtime delays the timer callback.
         if (Date.now() - started >= DEADLINE_MS) return finish("DEADLINE");
         var status = Number(response && response.status);
@@ -194,7 +195,7 @@
             }, RETRY_MS);
           } else if (!split) {
             batchFailed = true;
-            if (cooldownMS) { stopped = true; cooldown(cooldownMS); }
+            if (cooldownMS && !(prewarm && /^(HTTP_SERVER|TIMEOUT|NETWORK_TEMPORARY)$/.test(code))) { stopped = true; cooldown(cooldownMS); }
           }
         }
         pump();

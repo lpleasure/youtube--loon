@@ -11,8 +11,8 @@ if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(config.repository) ||
 const base = `https://raw.githubusercontent.com/${config.repository}/${config.ref}/dist`;
 const out = path.join(root, 'plugins');
 fs.mkdirSync(out, {recursive:true});
-for (const mode of ['probe','translate','prewarm']) {
-  for (const legacy of ['', '.legacy']) {
+for (const mode of ['translate','prewarm']) {
+  for (const legacy of ['']) {
     if (mode === 'prewarm' && legacy) continue;
     const name = `YouTube-${mode}${legacy}.plugin`;
     const input = fs.readFileSync(path.join(root,'dist',name),'utf8');

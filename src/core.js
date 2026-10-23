@@ -1,7 +1,6 @@
 /* Original implementation. No dependencies; shared by Node tests and Loon bundles. */
 var YTSubs = (function () {
   "use strict";
-  var MARKER = "[LOON 双语注入测试]";
   var URL_RE = /^https:\/\/(?:www\.youtube\.com|m\.youtube\.com|youtube\.com|video\.google\.com)\/api\/timedtext(?:\?|$)/;
   function fail(code, detail) { var e = new Error(code); e.code = code; e.detail = detail; throw e; }
   function clean(s) { return s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim(); }
@@ -74,8 +73,7 @@ var YTSubs = (function () {
   }
   function parse(body) {
     if (typeof body !== "string" || !body.trim()) fail("EMPTY_OR_BINARY");
-    if (body.length > 1000000) fail("BODY_LIMIT");
-    if (body.indexOf(MARKER) !== -1) fail("ALREADY_PROBED");
+    if (body.length > 4000000) fail("BODY_LIMIT");
     var s = body.replace(/^\uFEFF/, "").trim();
     if (s[0] === "{") return json3(body);
     if (/^WEBVTT(?:\s|$)/.test(s)) return vtt(body);
@@ -236,6 +234,6 @@ var YTSubs = (function () {
     return found;
   }
   function utf8size(s) { return encodeURIComponent(s).replace(/%[A-F\d]{2}/gi, "x").length; }
-  return {MARKER: MARKER, URL_RE: URL_RE, parse: parse, query: query, statusOK: statusOK, headers: headers, args: args, validateReply: validateReply, utf8size: utf8size};
+  return {URL_RE: URL_RE, parse: parse, query: query, statusOK: statusOK, headers: headers, args: args, validateReply: validateReply, utf8size: utf8size};
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = YTSubs;

@@ -52,12 +52,6 @@ for (const format of ['json3', 'srv3', 'srv1', 'vtt']) {
     assert.equal(parsed.cues[0].text, '你好 <世界> & 朋友\nHello world & friends.');
     assert.equal(parsed.cues[1].text, '欢迎\nWelcome!');
   });
-  test(`${format}: probe injects first cues without any network`, () => {
-    const h = harness('probe', {body: fixture(format)});
-    assert.equal(h.calls.length, 0); assert.equal(h.results.length, 1);
-    assert.ok(h.results[0].body.includes(C.MARKER));
-    assert.equal(h.results[0].headers['Content-Length'], undefined);
-  });
 }
 test('JSON3 retains event timings, window definitions and unrelated properties', () => {
   const original = JSON.parse(fixture('json3'));
@@ -87,7 +81,7 @@ test('VTT final newline does not create a detached translated block', () => {
 });
 for (const [name, body] of [
   ['invalid JSON', '{oops'], ['HTML error', '<html>error</html>'], ['binary', new Uint8Array([1,2])],
-  ['empty body', ''], ['body limit', 'x'.repeat(1000001)], ['protobuf-like', '\u0000\u0001abc'],
+  ['empty body', ''], ['body limit', 'x'.repeat(4000001)], ['protobuf-like', '\u0000\u0001abc'],
   ['rolling JSON', JSON.stringify({events: [{aAppend: 1}]})],
   ['rolling XML', '<timedtext format="3"><body><p a="1" t="0" d="2">a</p></body></timedtext>'],
   ['DTD', '<!DOCTYPE x><transcript></transcript>'],
@@ -99,9 +93,6 @@ for (const [name, body] of [
   ['invalid JSON3 timing', JSON.stringify({events: [{tStartMs: -1, dDurationMs: 3, segs: [{utf8: 'x'}]}]})]
 ]) test(`${name}: original response passes through without API`, () => {
   const h = harness('translate', {body}); assert.deepEqual(h.results, [{}]); assert.equal(h.calls.length, 0);
-});
-test('probe applied twice passes through unchanged', () => {
-  const a = harness('probe'); const b = harness('probe', {body: a.results[0].body}); assert.deepEqual(b.results, [{}]);
 });
 test('URL allowlist rejects lookalike and unrelated endpoints', () => {
   for (const url of ['https://www.youtube.com.evil.invalid/api/timedtext', 'https://www.youtube.com/api/timedtextother', 'https://youtubei.googleapis.com/youtubei/v1/player', 'http://www.youtube.com/api/timedtext']) {
@@ -197,16 +188,6 @@ test('header adjustment removes stale metadata and preserves Content-Type', () =
   assert.deepEqual(C.headers({'content-length':'1','CONTENT-ENCODING':'gzip',ETag:'x','Content-Type':'text/vtt','Cache-Control':'public',Server:'test'}),{'Content-Type':'text/vtt',Server:'test','Cache-Control':'no-store'});
 });
 test('UTF8 cache size counts Chinese and emoji correctly', () => { assert.equal(C.utf8size('a中😀'),Buffer.byteLength('a中😀')); });
-test('distribution probe contains no HTTP client and new/legacy configs are distinct', () => {
-  assert.equal(fs.readFileSync(path.join(root,'dist/yt-probe.js'),'utf8').includes('$httpClient'),false);
-  const modern=fs.readFileSync(path.join(root,'dist/YouTube-translate.plugin'),'utf8');
-  const legacy=fs.readFileSync(path.join(root,'dist/YouTube-translate.legacy.plugin'),'utf8');
-  assert.ok(modern.includes('requires_body=true')); assert.ok(modern.includes('${enabled}'));
-  assert.ok(legacy.includes('requires-body=true')); assert.ok(legacy.includes('http-response'));
-  assert.equal(modern.includes('api_key'),false); assert.equal(legacy.includes('api_key'),false);
-  const ruleRegex = new RegExp(modern.match(/~= \/(.*)\/ then/)[1]);
-  assert.equal(ruleRegex.test(requestURL),true); assert.equal(ruleRegex.test(requestURL.replace('youtube.com','youtube.com.invalid')),false);
-});
 test('cache capacity is bounded by both bytes and record count', () => {
   const records = Array.from({length:500},(_,i)=>({k:'old'+i,v:'中'.repeat(800),expires:Date.now()+100000}));
   const h = harness('translate',{store:{'ytloon.cache.v1':JSON.stringify(records)}}); h.respond();
@@ -522,17 +503,6 @@ test('auth during split stops queued child',()=>{
   httpFailure(h,1,401); h.respond(2); assert.equal(h.calls.length,3);
   assert.equal(h.results.length,1); assert.ok(h.results[0].body.includes('译文'));
 });
-test('manual start prioritizes later cues and cache remains reusable',()=>{
-  const h=harness('translate',{body:manyCues(150),args:{enabled:true,start_seconds:100}});
-  assert.equal(inputOf(h.calls[0])[0].id,100);
-  for(let i=0;i<h.calls.length;i++) h.respond(i);
-  const out=JSON.parse(h.results[0].body); assert.equal(out.events[0].segs[0].utf8,'cue 0');
-  assert.ok(out.events[149].segs[0].utf8.includes('译文'));
-  const b=harness('translate',{body:manyCues(150),store:h.store});
-  assert.equal(inputOf(b.calls[0])[0].id,0);
-  for(let i=0;i<b.calls.length;i++) b.respond(i);
-  assert.ok(JSON.parse(b.results[0].body).events[149].segs[0].utf8.includes('译文'));
-});
 test('repeat request advances past the first 96 cached cues',()=>{
   const h=harness('translate',{body:manyCues(150)}); for(let i=0;i<h.calls.length;i++) h.respond(i);
   const b=harness('translate',{body:manyCues(150),store:h.store});
@@ -540,21 +510,13 @@ test('repeat request advances past the first 96 cached cues',()=>{
   for(let i=0;i<b.calls.length;i++) b.respond(i);
   assert.ok(JSON.parse(b.results[0].body).events[149].segs[0].utf8.includes('译文'));
 });
-test('all subtitle formats expose timing and reject invalid start settings',()=>{
-  for(const format of ['json3','srv1','srv3','vtt']) {
-    const cues=C.parse(fixture(format)).cues; assert.equal(cues[0].startSeconds,1); assert.equal(cues[1].startSeconds,4);
-    const h=harness('translate',{body:fixture(format),args:{enabled:true,start_seconds:3}});
-    assert.equal(inputOf(h.calls[0])[0].id,1); h.respond(); assert.equal(h.results.length,1);
-  }
-  for(const value of ['bad',-1,604801,'Infinity']) assert.equal(harness('translate',{args:{enabled:true,start_seconds:value}}).calls.length,0);
-});
 test('remote subscriptions use configured branch and bundles match source',()=>{
   const config=require('../subscription.json');
-  for(const mode of ['translate','probe']) {
+  for(const mode of ['translate']) {
     const script=fs.readFileSync(path.join(root,'dist','yt-'+mode+'.js'),'utf8');
     assert.ok(script.endsWith(fs.readFileSync(path.join(root,'src/'+mode+'.js'),'utf8')));
     assert.ok(script.includes(fs.readFileSync(path.join(root,'src/core.js'),'utf8')));
-    for(const legacy of ['', '.legacy']) {
+    for(const legacy of ['']) {
       const plugin=fs.readFileSync(path.join(root,'plugins','YouTube-'+mode+legacy+'.plugin'),'utf8');
       assert.ok(plugin.includes('https://raw.githubusercontent.com/'+config.repository+'/'+config.ref+'/dist/yt-'+mode+'.js'));
     }
@@ -618,3 +580,27 @@ test('prewarm subscription points to worker and gives it a 300s runtime',()=>{
   assert.ok(plugin.includes('generic then script'));assert.ok(plugin.includes('timeout=300'));
   assert.ok(plugin.includes(require('../subscription.json').ref+'/dist/yt-prewarm.js'));
 });
+
+test('four-hour 14400-cue track survives prewarm and fully cached replay',()=>{
+ const body=manyCues(14400), capture=harness('translate',{body,args:{enabled:true}}); capture.deadline();
+ const worker=harness('prewarm',{store:capture.store});
+ for(let i=0;i<worker.calls.length;i++) worker.respond(i);
+ assert.equal(JSON.parse(worker.store['ytloon.cache.v1']).length,14400);
+ const replay=harness('translate',{body,store:worker.store,args:{enabled:true}});
+ assert.equal(replay.calls.length,0);
+ assert.equal(JSON.parse(replay.results[0].body).events.filter(e=>e.segs[0].utf8.includes('译文')).length,14400);
+});
+test('prewarm recovers missing callback and ignores late original success',()=>{
+ const h=harness('translate',{body:manyCues(48),args:{enabled:true}});h.deadline();
+ const w=harness('prewarm',{store:h.store}); w.respond(1); w.advance(30750);
+ assert.equal(w.calls.length,3);w.respond(2);const saved=w.store['ytloon.cache.v1'];w.respond(0);
+ assert.equal(w.store['ytloon.cache.v1'],saved);assert.equal(w.results.length,1);
+ assert.equal(JSON.parse(saved).length,48);
+});
+test('prewarm repeated transient failure does not abandon later batches',()=>{
+ const h=harness('translate',{body:manyCues(240),args:{enabled:true,concurrency:1}});h.deadline();
+ const w=harness('prewarm',{store:h.store});httpFailure(w,0,503);w.advance(750);httpFailure(w,1,503);
+ for(let i=2;i<w.calls.length;i++) w.respond(i);
+ assert.equal(w.results.length,1);assert.equal(JSON.parse(w.store['ytloon.cache.v1']).length,216);
+});
+test('release ignores old start offsets',()=>{const h=harness('translate',{body:manyCues(2),args:{enabled:true,start_seconds:100}});assert.equal(inputOf(h.calls[0])[0].id,0);h.respond();assert.equal(h.results.length,1);});
