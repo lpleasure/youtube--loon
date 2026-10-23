@@ -80,6 +80,49 @@ var YTSubs = (function () {
     if (/^(?:<\?xml[^?]*\?>\s*)?<(?:timedtext|transcript)\b/.test(s)) return xml(body);
     fail("UNSUPPORTED_FORMAT");
   }
+  // Sentence reconstruction is restricted to word-timed JSON3 tracks.
+  // No estimated character timings: unsupported timing remains unchanged.
+  function sentenceParse(body) {
+    var original = parse(body);
+    if (original.format !== "json3") return original;
+    var source = JSON.parse(body.replace(/^\uFEFF/, "")), events = source.events.filter(function (e) { return e.segs && e.segs.some(function (s) { return s.utf8.trim(); }); });
+    var timed = 0, windowID;
+    if (!events.length || events.some(function (e, i) {
+      if (!i) windowID = e.wWinId;
+      if (e.wWinId !== windowID) return true;
+      var last = -1;
+      return e.segs.some(function (s, j) {
+        var offset = s.tOffsetMs === undefined && j === 0 ? 0 : s.tOffsetMs;
+        if (!Number.isFinite(offset) || offset < last || offset < 0 || offset >= e.dDurationMs) return true;
+        last = offset; if (j) timed++; return false;
+      });
+    }) || timed < 3) return original;
+    var tokens = [];
+    events.forEach(function (e) { e.segs.forEach(function (s) {
+      if (s.utf8.trim()) tokens.push({text: s.utf8, start: e.tStartMs + (s.tOffsetMs || 0), end: e.tStartMs + e.dDurationMs});
+    }); });
+    // Repeated/overlapping word timestamps need a track-specific deduplicator.
+    if (tokens.some(function (t, i) { return i && t.start <= tokens[i - 1].start; })) return original;
+    var rebuilt = [], current = null;
+    function flush(end) {
+      if (!current) return;
+      rebuilt.push({tStartMs: current.start, dDurationMs: Math.max(1, end - current.start), segs: [{utf8: current.text.trim()}]}); current = null;
+    }
+    tokens.forEach(function (t, i) {
+      var previous = tokens[i - 1];
+      if (current && (t.start - current.start >= 12000 || current.text.length + t.text.length > 240 || previous.end + 1500 < t.start)) flush(Math.min(previous.end, t.start));
+      if (!current) current = {start: t.start, text: ""};
+      current.text += (current.text && !/\s$/.test(current.text) && !/^\s|^[,.;:!?]/.test(t.text) ? " " : "") + t.text;
+      var next = tokens[i + 1];
+      if (/[.!?]["'’”)]*\s*$/.test(t.text) || !next) flush(next ? Math.min(t.end, next.start) : t.end);
+    });
+    var normalized = {events: rebuilt};
+    var result = parse(JSON.stringify(normalized));
+    // With no translations, keep the exact upstream response.
+    var render = result.render;
+    result.render = function (translations) { return Object.keys(translations).length ? render(translations) : body; };
+    return result;
+  }
   function json3(body) {
     var doc;
     try { doc = JSON.parse(body.replace(/^\uFEFF/, "")); } catch (_) { fail("INVALID_JSON"); }
@@ -250,6 +293,6 @@ var YTSubs = (function () {
     return found;
   }
   function utf8size(s) { return encodeURIComponent(s).replace(/%[A-F\d]{2}/gi, "x").length; }
-  return {URL_RE: URL_RE, parse: parse, query: query, statusOK: statusOK, headers: headers, args: args, validateReply: validateReply, utf8size: utf8size};
+  return {URL_RE: URL_RE, parse: parse, sentenceParse: sentenceParse, query: query, statusOK: statusOK, headers: headers, args: args, validateReply: validateReply, utf8size: utf8size};
 })();
 if (typeof module !== "undefined" && module.exports) module.exports = YTSubs;

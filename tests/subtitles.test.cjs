@@ -622,3 +622,24 @@ test('overlap repair uses time order and also clears preceding untranslated cue'
  const body=JSON.stringify({events:[{tStartMs:2000,dDurationMs:1000,segs:[{utf8:'B'}]},{tStartMs:0,dDurationMs:5000,segs:[{utf8:'A'}]}]});
  const out=JSON.parse(C.parse(body).render({0:'乙'}));assert.equal(out.events[1].dDurationMs,2000);assert.equal(out.events[1].segs[0].utf8,'A');
 });
+function sentenceSample() {
+ return JSON.stringify({events:[
+ {tStartMs:92000,dDurationMs:4000,segs:[{utf8:'Let me ',tOffsetMs:0},{utf8:'read to you ',tOffsetMs:500},{utf8:"its blurb from Let's Go.",tOffsetMs:1000},{utf8:' The stone city ',tOffsetMs:2000}]},
+ {tStartMs:95000,dDurationMs:4000,segs:[{utf8:'that rests ',tOffsetMs:0},{utf8:'at the foot ',tOffsetMs:500},{utf8:'of a great rocky mountain.',tOffsetMs:1000},{utf8:' This is rugged.',tOffsetMs:2000}]}
+ ]});
+}
+test('sentence sync binds complete source sentence and translation to the same interval',()=>{
+ const body=sentenceSample(),d=C.sentenceParse(body);
+ assert.equal(d.cues.length,3);assert.equal(d.cues[1].text,'The stone city that rests at the foot of a great rocky mountain.');
+ const out=JSON.parse(d.render({0:'让我读简介。',1:'这座石头城坐落在一座巨大的岩石山脚下。',2:'这里崎岖。'}));
+ assert.equal(out.events[1].tStartMs,94000);assert.equal(out.events[1].dDurationMs,3000);
+ assert.equal(out.events[1].segs[0].utf8,'这座石头城坐落在一座巨大的岩石山脚下。\nThe stone city that rests at the foot of a great rocky mountain.');
+ assert.equal(d.render({}),body);
+ const h=harness('translate',{body});assert.equal(inputOf(h.calls[0])[1].text,d.cues[1].text);h.respond();assert.equal(h.results.length,1);
+});
+test('sentence sync does not estimate missing timing or merge multiple windows',()=>{
+ for(const mutate of [d=>{delete d.events[0].segs[1].tOffsetMs;},d=>{d.events[1].wWinId=5;},d=>{d.events[1].tStartMs=92000;}]){
+ const d=JSON.parse(sentenceSample());mutate(d);const body=JSON.stringify(d);
+ assert.deepEqual(C.sentenceParse(body).cues,C.parse(body).cues);
+ }
+});
