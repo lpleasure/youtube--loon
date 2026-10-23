@@ -643,3 +643,29 @@ test('sentence sync does not estimate missing timing or merge multiple windows',
  assert.deepEqual(C.sentenceParse(body).cues,C.parse(body).cues);
  }
 });
+function srvSentences() {
+ return '<timedtext format="3"><body><p t="92000" d="4000"><s t="0">Let me read its blurb.</s><s t="2000"> The stone city that rests</s></p><p t="96000" d="5000"><s t="0">at the foot of a great rocky mountain.</s><s t="3000"> This is rugged.</s></p></body></timedtext>';
+}
+test('SRV3 sentence reconstruction preserves format and binds bilingual text to one interval',()=>{
+ const body=srvSentences(),d=C.sentenceParse(body);assert.equal(d.format,'srv3');assert.equal(d.sentenceMode,'srv3_estimated');
+ assert.equal(d.cues[1].text,'The stone city that rests at the foot of a great rocky mountain.');
+ const out=d.render({0:'让我读简介。',1:'这座石头城坐落在巨大的岩石山脚下。',2:'这里崎岖。'}),parsed=C.parse(out);
+ assert.equal(parsed.cues[1].text,'这座石头城坐落在巨大的岩石山脚下。\nThe stone city that rests at the foot of a great rocky mountain.');
+ assert.equal(parsed.cues[1].startSeconds,94);assert.ok(out.includes('t="94000" d="5000"'));assert.equal(d.render({}),body);
+});
+test('SRV3 plain cues can split multiple sentences and preserve XML entities',()=>{
+ const body='<timedtext format="3"><body><p t="0" d="8000">One &amp; two. Three &lt; four. Five and six.</p></body></timedtext>';
+ const d=C.sentenceParse(body);assert.equal(d.cues.length,3);assert.equal(d.cues[0].text,'One & two.');
+ const parsed=C.parse(d.render({0:'一与二。',1:'三小于四。',2:'五和六。'}));assert.equal(parsed.cues.length,3);assert.ok(parsed.cues[1].text.includes('Three < four.'));
+});
+test('SRV3 new sentence cache namespace bypasses old translations without clearing key',()=>{
+ const body=srvSentences(),d=C.sentenceParse(body),old=d.cues.map(c=>({k:JSON.stringify(['prompt-v1','deepseek-flash','zh-Hans','en',c.text]),v:'OLD_TRANSLATION',expires:Date.now()+86400000}));
+ const h=harness('translate',{body,store:{'ytloon.cache.v1':JSON.stringify(old)}});assert.ok(h.calls.length);h.respond();
+ assert.ok(h.logs.some(s=>s.includes('sentence=srv3_estimated')));assert.equal(h.results[0].body.includes('OLD_TRANSLATION'),false);
+ assert.ok(h.store['ytloon.deepseek.key']);assert.ok(JSON.parse(h.store['ytloon.cache.v1']).some(r=>r.v==='OLD_TRANSLATION'));
+ const replay=harness('translate',{body,store:h.store});assert.equal(replay.calls.length,0);assert.ok(replay.results[0].body.includes('译文'));
+});
+test('SRV3 multiple windows fall back without merging separate speakers',()=>{
+ const body=srvSentences().replace('t="92000"','w="1" t="92000"').replace('t="96000"','w="2" t="96000"');
+ const d=C.sentenceParse(body);assert.equal(d.sentenceMode,'fallback_multiwindow');assert.deepEqual(d.cues,C.parse(body).cues);
+});
